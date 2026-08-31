@@ -198,6 +198,40 @@ class TorboxProvider(SourceProvider):
             file_index=idx,
         ))
 
+    async def get_library_hashes(self, config: SourceProviderConfig) -> set[str]:
+        """Fetch all torrent hashes currently on the user's TorBox account."""
+        api_key = config.credentials.get("api_key", "")
+        if not api_key:
+            return set()
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(
+                    f"{TORBOX_API_BASE}/torrents/mylist",
+                    params={"bypass_cache": "true"},
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                if resp.status_code != 200:
+                    logger.warning("TorBox mylist returned %d", resp.status_code)
+                    return set()
+                data = resp.json()
+        except (httpx.HTTPError, httpx.TimeoutException, ValueError) as e:
+            logger.warning("TorBox mylist failed: %s", e)
+            return set()
+
+        if not data.get("success", False):
+            return set()
+
+        hashes: set[str] = set()
+        items = data.get("data")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    h = item.get("hash", "")
+                    if h:
+                        hashes.add(h.lower())
+        logger.info("TorBox library: %d torrents on account", len(hashes))
+        return hashes
+
     async def resolve(
         self, config: SourceProviderConfig, info_hash: str, file_index: int | None = None,
     ) -> dict:

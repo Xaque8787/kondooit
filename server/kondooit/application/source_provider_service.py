@@ -279,16 +279,28 @@ class SourceProviderService:
         all_results: list[SourceResult] = list(direct_results)
 
         cached_hashes: set[str] = set()
+        library_hashes: set[str] = set()
         if scraper_results:
-            cache_results = await self._run_cache_checks(
-                enabled_configs, scraper_results
+            cache_task = self._run_cache_checks(enabled_configs, scraper_results)
+            library_task = self._fetch_library_hashes(enabled_configs)
+            cache_results, lib_hashes = await asyncio.gather(
+                cache_task, library_task, return_exceptions=True,
             )
+            if isinstance(cache_results, BaseException):
+                logger.error("Cache check pipeline failed: %s", cache_results)
+                cache_results = []
+            if isinstance(lib_hashes, BaseException):
+                logger.error("Library hash fetch failed: %s", lib_hashes)
+                lib_hashes = set()
             all_results.extend(cache_results)
             cached_hashes = {r.info_hash.lower() for r in cache_results if r.info_hash}
+            library_hashes = lib_hashes
 
         for sr in scraper_results:
-            if sr.info_hash.lower() in cached_hashes:
+            h = sr.info_hash.lower()
+            if h in cached_hashes:
                 continue
+            in_library = h in library_hashes
             all_results.append(SourceResult(
                 provider_key=sr.source,
                 filename=sr.title,
@@ -297,11 +309,11 @@ class SourceProviderService:
                 codec=_detect_codec(sr.title),
                 info_hash=sr.info_hash,
                 seeders=sr.seeders,
-                source_type="uncached_torrent",
+                source_type="in_library" if in_library else "uncached_torrent",
                 scraper_source=sr.source,
             ))
 
-        source_type_order = {"direct": 0, "cached_torrent": 1, "uncached_torrent": 2}
+        source_type_order = {"direct": 0, "cached_torrent": 1, "in_library": 2, "uncached_torrent": 3}
         quality_order = {"2160p": 0, "1080p": 1, "720p": 2, "480p": 3, "": 4}
         all_results.sort(
             key=lambda r: (
@@ -436,6 +448,24 @@ class SourceProviderService:
             )
         except asyncio.TimeoutError:
             return []
+
+    async def _fetch_library_hashes(
+        self, configs: list[SourceProviderConfig]
+    ) -> set[str]:
+        """Fetch hashes already on the user's debrid accounts."""
+        all_hashes: set[str] = set()
+        for config in configs:
+            provider = self._registry.get(config.key)
+            if provider is None:
+                continue
+            if not hasattr(provider, "get_library_hashes"):
+                continue
+            try:
+                hashes = await provider.get_library_hashes(config)
+                all_hashes.update(hashes)
+            except Exception as e:
+                logger.warning("Library hash fetch failed for %s: %s", config.key, e)
+        return all_hashes
 
     async def _run_cache_checks(
         self,
