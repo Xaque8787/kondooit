@@ -197,6 +197,22 @@ class SourceProviderService:
             return False
         return await provider.test_connection(config)
 
+    async def resolve_stream(
+        self,
+        session: "AsyncSessionProtocol",
+        provider_key: str,
+        info_hash: str,
+        file_index: int | None = None,
+    ) -> dict:
+        """Resolve a hash to a playable stream URL via a debrid provider."""
+        config = await self._config_repo.get(session, provider_key)
+        if config is None or config.status != SourceProviderStatus.ENABLED:
+            return {"success": False, "detail": f"Provider '{provider_key}' not configured or disabled"}
+        provider = self._registry.get(provider_key)
+        if provider is None or not hasattr(provider, "resolve"):
+            return {"success": False, "detail": f"Provider '{provider_key}' does not support resolve"}
+        return await provider.resolve(config, info_hash, file_index)
+
     async def add_torrent(
         self, session: "AsyncSessionProtocol", provider_key: str, info_hash: str
     ) -> dict:
@@ -454,10 +470,12 @@ class SourceProviderService:
             *[t for _, t in tasks], return_exceptions=True
         )
 
+        total_cached = 0
         for (provider_key, _), cache_results in zip(tasks, task_results):
             if isinstance(cache_results, BaseException):
                 logger.warning("Cache check failed for %s: %s", provider_key, cache_results)
                 continue
+            total_cached += len(cache_results)
             for cr in cache_results:
                 scraper_info = hash_to_scraper.get(cr.info_hash.lower())
                 seeders = scraper_info.seeders if scraper_info else None
@@ -474,6 +492,13 @@ class SourceProviderService:
                     source_type="cached_torrent",
                     scraper_source=scraper_source,
                 ))
+
+        if total_cached == 0 and len(hashes) >= 10:
+            logger.warning(
+                "0 cached out of %d hashes across %d providers — "
+                "possible API response format change or auth issue",
+                len(hashes), len(tasks),
+            )
 
         return results
 

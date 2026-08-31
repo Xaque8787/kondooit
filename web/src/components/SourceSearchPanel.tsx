@@ -30,12 +30,15 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
   const [error, setError] = useState("");
   const [addingHash, setAddingHash] = useState<string | null>(null);
   const [addedHashes, setAddedHashes] = useState<Set<string>>(new Set());
+  const [resolvingHash, setResolvingHash] = useState<string | null>(null);
+  const [streamUrls, setStreamUrls] = useState<Record<string, string>>({});
 
   const handleSearch = async () => {
     setSearching(true);
     setError("");
     setResults(null);
     setAddedHashes(new Set());
+    setStreamUrls({});
     try {
       const res = await api.searchSources(title, year, season, episode, tmdbId, contentType);
       setResults(res);
@@ -59,6 +62,23 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
       setError(err instanceof Error ? err.message : "Failed to add torrent");
     } finally {
       setAddingHash(null);
+    }
+  };
+
+  const handleResolve = async (infoHash: string, providerKey: string) => {
+    setResolvingHash(infoHash);
+    setError("");
+    try {
+      const res = await api.resolveStream(infoHash, providerKey);
+      if (res.success && res.stream_url) {
+        setStreamUrls(prev => ({ ...prev, [infoHash]: res.stream_url! }));
+      } else {
+        setError(res.detail || "Failed to get stream URL");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to resolve stream");
+    } finally {
+      setResolvingHash(null);
     }
   };
 
@@ -105,7 +125,13 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
               </p>
               <div className="space-y-2">
                 {cachedResults.map((r, i) => (
-                  <SourceRow key={`cached-${i}`} result={r} />
+                  <SourceRow
+                    key={`cached-${i}`}
+                    result={r}
+                    onResolve={r.info_hash ? () => handleResolve(r.info_hash!, r.provider_key) : undefined}
+                    resolving={r.info_hash === resolvingHash}
+                    streamUrl={r.info_hash ? streamUrls[r.info_hash] : undefined}
+                  />
                 ))}
               </div>
             </div>
@@ -141,89 +167,141 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
   );
 }
 
-function SourceRow({ result: r, onAdd, adding, added }: {
+function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, streamUrl }: {
   result: SourceResult;
   onAdd?: () => void;
   adding?: boolean;
   added?: boolean;
+  onResolve?: () => void;
+  resolving?: boolean;
+  streamUrl?: string;
 }) {
   return (
-    <div className="flex items-start gap-3 p-3 rounded-lg bg-ink-900/50 border border-ink-800/50">
-      <div className="flex-1 min-w-0">
-        <p className="text-sm text-ink-200 truncate" title={r.filename}>
-          {r.filename}
-        </p>
-        <div className="flex flex-wrap items-center gap-2 mt-1.5">
-          {r.quality && (
-            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-brand-600/20 text-brand-400">
-              {r.quality}
+    <div className="flex flex-col gap-2 p-3 rounded-lg bg-ink-900/50 border border-ink-800/50">
+      <div className="flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <p className="text-sm text-ink-200 truncate" title={r.filename}>
+            {r.filename}
+          </p>
+          <div className="flex flex-wrap items-center gap-2 mt-1.5">
+            {r.quality && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-brand-600/20 text-brand-400">
+                {r.quality}
+              </span>
+            )}
+            {r.codec && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-ink-800 text-ink-400">
+                {r.codec}
+              </span>
+            )}
+            {r.source_type === "cached_torrent" && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-600/20 text-emerald-400">
+                Cached
+              </span>
+            )}
+            {r.source_type === "uncached_torrent" && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-600/20 text-amber-400">
+                Uncached
+              </span>
+            )}
+            {r.size_bytes > 0 && (
+              <span className="text-[10px] text-ink-500">
+                {formatSize(r.size_bytes)}
+              </span>
+            )}
+            {r.duration_seconds && (
+              <span className="text-[10px] text-ink-500">
+                {formatDuration(r.duration_seconds)}
+              </span>
+            )}
+            {r.seeders != null && r.seeders > 0 && (
+              <span className="text-[10px] text-ink-500">
+                {r.seeders} seeders
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 mt-1">
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-ink-800/80 text-ink-400 border border-ink-700/50">
+              {r.provider_key}
             </span>
-          )}
-          {r.codec && (
-            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-ink-800 text-ink-400">
-              {r.codec}
-            </span>
-          )}
-          {r.source_type === "cached_torrent" && (
-            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-600/20 text-emerald-400">
-              Cached
-            </span>
-          )}
-          {r.source_type === "uncached_torrent" && (
-            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-600/20 text-amber-400">
-              Uncached
-            </span>
-          )}
-          {r.size_bytes > 0 && (
-            <span className="text-[10px] text-ink-500">
-              {formatSize(r.size_bytes)}
-            </span>
-          )}
-          {r.duration_seconds && (
-            <span className="text-[10px] text-ink-500">
-              {formatDuration(r.duration_seconds)}
-            </span>
-          )}
-          {r.seeders != null && r.seeders > 0 && (
-            <span className="text-[10px] text-ink-500">
-              {r.seeders} seeders
-            </span>
-          )}
+            {r.scraper_source && (
+              <span className="text-[10px] text-ink-600">
+                found by {r.scraper_source}
+              </span>
+            )}
+          </div>
         </div>
-        <div className="flex items-center gap-2 mt-1">
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-ink-800/80 text-ink-400 border border-ink-700/50">
-            {r.provider_key}
-          </span>
-          {r.scraper_source && (
-            <span className="text-[10px] text-ink-600">
-              found by {r.scraper_source}
-            </span>
+        <div className="shrink-0 flex items-center gap-2">
+          {onResolve && !streamUrl && (
+            <button
+              onClick={onResolve}
+              disabled={resolving}
+              className="text-[11px] font-medium px-2.5 py-1.5 rounded transition-colors bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30"
+            >
+              {resolving ? (
+                <span className="flex items-center gap-1">
+                  <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Resolving...
+                </span>
+              ) : (
+                "Stream"
+              )}
+            </button>
+          )}
+          {onAdd && (
+            <button
+              onClick={onAdd}
+              disabled={adding || added}
+              className={`text-[11px] font-medium px-2.5 py-1.5 rounded transition-colors ${
+                added
+                  ? "bg-emerald-600/20 text-emerald-400 cursor-default"
+                  : "bg-brand-600/20 text-brand-400 hover:bg-brand-600/30"
+              }`}
+            >
+              {adding ? (
+                <span className="flex items-center gap-1">
+                  <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                </span>
+              ) : added ? (
+                "Added"
+              ) : (
+                "Add"
+              )}
+            </button>
           )}
         </div>
       </div>
-      {onAdd && (
-        <button
-          onClick={onAdd}
-          disabled={adding || added}
-          className={`shrink-0 text-[11px] font-medium px-2.5 py-1.5 rounded transition-colors ${
-            added
-              ? "bg-emerald-600/20 text-emerald-400 cursor-default"
-              : "bg-brand-600/20 text-brand-400 hover:bg-brand-600/30"
-          }`}
-        >
-          {adding ? (
-            <span className="flex items-center gap-1">
-              <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-            </span>
-          ) : added ? (
-            "Added"
-          ) : (
-            "Add"
-          )}
-        </button>
+      {streamUrl && (
+        <div className="flex items-center gap-2 px-2 py-2 rounded bg-emerald-950/40 border border-emerald-800/30">
+          <svg className="shrink-0 h-3.5 w-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <a
+            href={streamUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[11px] text-emerald-400 hover:text-emerald-300 underline underline-offset-2 truncate transition-colors"
+            title={streamUrl}
+          >
+            Open stream in new tab
+          </a>
+          <button
+            onClick={() => {
+              navigator.clipboard.writeText(streamUrl);
+            }}
+            className="shrink-0 text-[10px] text-ink-400 hover:text-ink-200 px-1.5 py-0.5 rounded bg-ink-800/50 transition-colors"
+            title="Copy URL to clipboard"
+          >
+            Copy
+          </button>
+        </div>
       )}
     </div>
   );

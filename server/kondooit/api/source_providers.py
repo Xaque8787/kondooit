@@ -60,6 +60,18 @@ class SourceSearchRequestBody(BaseModel):
     content_type: str = "movie"
 
 
+class ResolveRequest(BaseModel):
+    info_hash: str
+    provider_key: str = "torbox"
+    file_index: int | None = None
+
+
+class ResolveResponse(BaseModel):
+    success: bool
+    detail: str
+    stream_url: str | None = None
+
+
 class AddTorrentRequest(BaseModel):
     info_hash: str
     provider_key: str = "torbox"
@@ -246,6 +258,22 @@ class SourceProviderController(Controller):
     ) -> AddTorrentResponse:
         result = await source_provider_service.add_torrent(session, data.provider_key, data.info_hash)
         return AddTorrentResponse(success=result["success"], detail=result["detail"])
+
+    @post("/resolve")
+    async def resolve_stream(
+        self,
+        data: ResolveRequest,
+        session: AsyncSession,
+        source_provider_service: SourceProviderService,
+    ) -> ResolveResponse:
+        result = await source_provider_service.resolve_stream(
+            session, data.provider_key, data.info_hash, data.file_index,
+        )
+        return ResolveResponse(
+            success=result.get("success", False),
+            detail=result.get("detail", ""),
+            stream_url=result.get("stream_url"),
+        )
 
     @get("/scrapers")
     async def list_scrapers(

@@ -13,7 +13,20 @@
       "content_types": ["movie", "series"],
       "tier": 1,
       "default_enabled": true,
-      "config_schema": null
+      "config_schema": {
+        "sort": {
+          "type": "select",
+          "label": "Sort by",
+          "options": ["seeders", "size", "quality"],
+          "default": "seeders"
+        },
+        "quality_filter": {
+          "type": "select",
+          "label": "Quality filter",
+          "options": ["other", "480p", "720p", "1080p", "2160p", "scr", "cam"],
+          "default": "other"
+        }
+      }
     },
     {
       "key": "mediafusion",
@@ -23,7 +36,14 @@
       "content_types": ["movie", "series"],
       "tier": 1,
       "default_enabled": true,
-      "config_schema": null
+      "config_schema": {
+        "stream_type": {
+          "type": "select",
+          "label": "Stream type",
+          "options": ["torrent", "direct"],
+          "default": "torrent"
+        }
+      }
     }
   ]
 }

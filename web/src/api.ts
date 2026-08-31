@@ -210,6 +210,12 @@ export const api = {
       body: JSON.stringify({ info_hash, provider_key }),
     }),
 
+  resolveStream: (info_hash: string, provider_key: string = "torbox", file_index?: number) =>
+    request<{ success: boolean; detail: string; stream_url: string | null }>("/source-providers/resolve", {
+      method: "POST",
+      body: JSON.stringify({ info_hash, provider_key, file_index: file_index ?? null }),
+    }),
+
   // Scraper modules
   listScraperModules: () =>
     request<import("./types").ScraperModule[]>("/source-providers/scrapers"),

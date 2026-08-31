@@ -198,6 +198,107 @@ class TorboxProvider(SourceProvider):
             file_index=idx,
         ))
 
+    async def resolve(
+        self, config: SourceProviderConfig, info_hash: str, file_index: int | None = None,
+    ) -> dict:
+        """Resolve a cached hash to a playable download URL.
+
+        Flow: create/find torrent on account -> pick the right file -> request download link.
+        """
+        api_key = config.credentials.get("api_key", "")
+        if not api_key:
+            return {"success": False, "detail": "No API key configured"}
+
+        if len(info_hash) == 40 and all(c in "0123456789abcdef" for c in info_hash.lower()):
+            magnet = f"magnet:?xt=urn:btih:{info_hash}"
+        else:
+            magnet = info_hash
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Step 1: add torrent (instant for cached content)
+                create_resp = await client.post(
+                    f"{TORBOX_API_BASE}/torrents/createtorrent",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data={"magnet": magnet, "seed": "1", "allow_zip": "false"},
+                )
+                create_data = create_resp.json()
+                if create_resp.status_code not in (200, 201):
+                    return {"success": False, "detail": create_data.get("detail", f"HTTP {create_resp.status_code}")}
+
+                torrent_id = None
+                inner = create_data.get("data")
+                if isinstance(inner, dict):
+                    torrent_id = inner.get("torrent_id") or inner.get("id")
+
+                if not torrent_id:
+                    return {"success": False, "detail": "No torrent ID returned from createtorrent"}
+
+                # Step 2: pick the right file
+                resolved_file_id = file_index
+                if resolved_file_id is None:
+                    resolved_file_id = await self._pick_largest_video_file(client, api_key, torrent_id)
+
+                if resolved_file_id is None:
+                    return {"success": False, "detail": "No video file found in torrent"}
+
+                # Step 3: request download link
+                dl_resp = await client.get(
+                    f"{TORBOX_API_BASE}/torrents/requestdl",
+                    params={"token": api_key, "torrent_id": str(torrent_id), "file_id": str(resolved_file_id), "zip_link": "false"},
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                dl_data = dl_resp.json()
+
+                if dl_resp.status_code != 200 or not dl_data.get("success", False):
+                    return {"success": False, "detail": dl_data.get("detail", f"requestdl HTTP {dl_resp.status_code}")}
+
+                download_url = dl_data.get("data")
+                if not download_url:
+                    return {"success": False, "detail": "No download URL in response"}
+
+                return {"success": True, "detail": "Resolved", "stream_url": download_url}
+
+        except (httpx.HTTPError, httpx.TimeoutException, ValueError) as e:
+            return {"success": False, "detail": str(e)}
+
+    async def _pick_largest_video_file(
+        self, client: httpx.AsyncClient, api_key: str, torrent_id: int
+    ) -> int | None:
+        """Get torrent info and pick the largest video file."""
+        try:
+            resp = await client.get(
+                f"{TORBOX_API_BASE}/torrents/mylist",
+                params={"bypass_cache": "true", "id": str(torrent_id)},
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            data = resp.json()
+            if not data.get("success"):
+                return None
+
+            torrent_data = data.get("data")
+            if isinstance(torrent_data, list) and torrent_data:
+                torrent_data = torrent_data[0]
+            if not isinstance(torrent_data, dict):
+                return None
+
+            files = torrent_data.get("files", [])
+            best_id = None
+            best_size = 0
+            for f in files:
+                name = f.get("name", "") or f.get("short_name", "")
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                if ext not in VIDEO_EXTS:
+                    continue
+                size = f.get("size", 0) or 0
+                fid = f.get("id")
+                if fid is not None and size > best_size:
+                    best_size = size
+                    best_id = fid
+            return best_id
+        except (httpx.HTTPError, httpx.TimeoutException, ValueError):
+            return None
+
     async def add_torrent(self, config: SourceProviderConfig, magnet_or_hash: str) -> dict:
         """Add a torrent to the user's TorBox account by magnet link or info_hash.
 

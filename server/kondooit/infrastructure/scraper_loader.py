@@ -106,11 +106,31 @@ def parse_manifest(manifest_path: Path) -> ScraperModuleManifest | None:
     )
 
 
+def _ensure_shared_modules(scrapers_dir: Path) -> None:
+    """Pre-load shared helper modules (files starting with _) from a scrapers dir."""
+    for helper in sorted(scrapers_dir.glob("_*.py")):
+        mod_name = f"kondooit_scraper_shared_{helper.stem}"
+        if mod_name in sys.modules:
+            continue
+        spec = importlib.util.spec_from_file_location(mod_name, helper)
+        if spec is None or spec.loader is None:
+            continue
+        try:
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[mod_name] = mod
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            logger.warning("Failed to load shared module %s: %s", helper.name, e)
+            sys.modules.pop(mod_name, None)
+
+
 def load_scraper_from_file(scraper_path: Path, key: str) -> Scraper | None:
     """Dynamically load a scraper class from a Python file."""
     if not scraper_path.exists():
         logger.warning("Scraper file not found: %s", scraper_path)
         return None
+
+    _ensure_shared_modules(scraper_path.parent)
 
     module_name = f"kondooit_scraper_{key}"
     spec = importlib.util.spec_from_file_location(module_name, scraper_path)
