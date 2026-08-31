@@ -1,0 +1,486 @@
+# Kondooit — Permanent Engineering Guidance
+
+## Purpose
+
+Kondooit is a unified media/content system designed around coherent domain capabilities rather than around reproducing or combining existing applications.
+
+The project should extract the underlying capabilities that users actually need and implement them as a coherent system. Existing applications, libraries, protocols, and technologies may provide useful evidence and implementation references, but they do not define Kondooit's architecture.
+
+The goal is not to build "Jellyfin + Sonarr + Radarr + Prowlarr + AIOStreams + Dispatcharr + etc."
+
+The goal is to identify the underlying capabilities those systems provide, separate genuine domain capabilities from implementation details and ecosystem workarounds, and build those capabilities into a unified architecture.
+
+---
+
+# 1. Source of Truth and Authority
+
+Always inspect and follow the repository's governing documentation before making architectural or implementation decisions.
+
+The repository's hierarchy is:
+
+1. System Vision
+2. Architectural Principles
+3. Accepted ADRs
+4. Roadmap / current milestone
+5. Implementation
+
+Higher-level documents constrain lower-level implementation.
+
+Do not silently contradict or reinterpret an accepted ADR.
+
+If implementation appears to conflict with an accepted ADR, STOP and explain the conflict before changing the ADR or implementing around it.
+
+Do not modify accepted ADRs merely to make an implementation easier.
+
+If a genuinely new architectural decision is required, identify it explicitly and request or create an ADR according to the repository's established ADR process.
+
+---
+
+# 2. Scope Discipline
+
+Future capability awareness must never become present capability implementation.
+
+The architecture may contain clean extension points for future capabilities, but anticipated functionality must not be implemented merely because the system vision describes it.
+
+Only implement capabilities authorized by the current roadmap/milestone.
+
+Do not create placeholder implementations, empty services, speculative database tables, unused interfaces, or "future-proof" abstractions for capabilities that are not currently authorized.
+
+An extension point is acceptable when it is required by the current architecture or current capability.
+
+Building a framework for hypothetical future functionality is not.
+
+When uncertain whether something belongs in the current scope:
+
+1. Check the roadmap.
+2. Check the relevant ADRs.
+3. Check the architectural principles.
+4. If still unclear, STOP and ask rather than assuming.
+
+---
+
+# 3. Architecture Before Implementation
+
+Prefer understanding the problem and establishing the correct boundary before writing code.
+
+Do not allow an implementation detail to become an architectural concept simply because it exists in code.
+
+The desired progression is:
+
+Vision
+→ Questions
+→ Decisions
+→ Principles
+→ Technology baseline
+→ Roadmap
+→ Implementation
+
+When existing repositories or applications are analyzed, use a separate research process:
+
+Existing application
+→ What does it actually do?
+→ What problem does that solve?
+→ What domain capability does that represent?
+→ What entities does it require?
+→ What interfaces does it expose?
+→ What is genuine domain behavior?
+→ What is implementation detail?
+→ What is ecosystem adaptation?
+→ What is an ecosystem workaround?
+→ What is actually relevant to Kondooit?
+
+Research findings are evidence and hypotheses, not automatic architecture.
+
+Never conclude:
+
+"Existing application X has class/function/table Y, therefore Kondooit needs Y."
+
+---
+
+# 4. Domain-Centric Design
+
+Kondooit's domain must remain independent of implementation technologies.
+
+Domain concepts should represent what Kondooit means and does, not how a particular framework, database, protocol, or deployment system happens to implement it.
+
+The domain must not depend on:
+
+- Litestar
+- React
+- SQLAlchemy
+- PostgreSQL-specific behavior
+- iroh
+- Docker
+- HTTP framework types
+- ORM models
+- provider-specific API models
+- infrastructure configuration
+
+Technology-specific concepts belong at the appropriate architectural boundary.
+
+Dependency direction should point inward:
+
+Infrastructure
+→ Application
+→ Domain
+
+API/UI and infrastructure implementations may depend inward, but the domain must not depend outward.
+
+---
+
+# 5. Providers Are Capability Implementations
+
+Do not create a universal "Provider" abstraction merely because the system will eventually have many kinds of providers.
+
+Different provider types represent different capabilities.
+
+Examples may include:
+
+- Metadata providers
+- Source providers
+- Acquisition providers
+- Playback/source-resolution providers
+- Live TV providers
+
+These should only become abstractions when the relevant capability is actually being implemented.
+
+A metadata provider is not inherently the same abstraction as a playback provider or acquisition provider.
+
+Concrete providers such as TMDB and TVDB are implementations behind a metadata capability abstraction. They should not become special cases in the domain.
+
+Provider-specific data should be represented as provider evidence and translated into Kondooit's canonical domain model.
+
+Do not allow external provider schemas to become Kondooit's canonical data model.
+
+---
+
+# 6. Canonical Domain Ownership
+
+Kondooit owns its canonical domain model.
+
+External systems provide evidence about content; they do not define Kondooit's identity.
+
+For example:
+
+TMDB
+→ provider evidence
+→ Kondooit identity/mapping
+→ canonical Movie
+
+TVDB
+→ provider evidence
+→ Kondooit identity/mapping
+→ canonical Series
+
+Do not make TMDB IDs, TVDB IDs, or any other external identifier the canonical identity merely because it is convenient.
+
+Provider-specific identifiers belong at the integration/evidence boundary.
+
+Identity resolution should only be as sophisticated as the current scope requires. Do not prematurely build a generalized identity-resolution system for hypothetical future cases.
+
+---
+
+# 7. Separation of Responsibilities
+
+Keep responsibilities explicit.
+
+Typical separation:
+
+Domain:
+- business concepts
+- domain rules
+- canonical entities
+- capability contracts where appropriate
+
+Application:
+- use cases
+- orchestration
+- ports/interfaces
+- coordination between domain capabilities and infrastructure implementations
+
+API:
+- HTTP transport
+- request/response models
+- authentication transport concerns
+- translating API requests into application calls
+
+Infrastructure:
+- databases
+- ORM mappings
+- external API clients
+- cryptography implementations
+- networking implementations
+- filesystem/deployment integrations
+
+UI:
+- presentation
+- user interaction
+- API consumption
+- client-side state
+
+Do not allow a service to accumulate unrelated responsibilities simply because they are convenient to place together.
+
+If a service begins both orchestrating an external capability and owning an unrelated domain capability, reconsider the boundary.
+
+---
+
+# 8. Technology Isolation
+
+Technology choices are subordinate to the architecture.
+
+Litestar is an API implementation, not a domain concept.
+
+React/TypeScript is a client implementation, not a domain concept.
+
+SQLAlchemy is a persistence implementation, not a domain entity model.
+
+PostgreSQL is a persistence technology, not a domain concept.
+
+iroh is a networking implementation, not the application protocol.
+
+Docker is a deployment mechanism, not a domain dependency.
+
+External APIs such as TMDB and TVDB are provider implementations, not canonical data models.
+
+A technology may be replaced without requiring the domain model to be redesigned.
+
+---
+
+# 9. Networking and iroh
+
+The application protocol must remain independent of any particular transport.
+
+Conventional HTTP must remain a valid way to access the server where appropriate.
+
+iroh is a networking/transport implementation behind a Kondooit abstraction.
+
+Do not allow iroh-specific types, concepts, or assumptions to leak into the domain model.
+
+iroh may be used to prove or provide remote connectivity, but its existence must not automatically make every application component iroh-aware.
+
+Do not make iroh a hard dependency merely because the architecture anticipates remote connectivity.
+
+---
+
+# 10. Database Architecture
+
+PostgreSQL is the intended persistent database technology.
+
+SQLAlchemy is an infrastructure implementation detail.
+
+Domain entities must not be SQLAlchemy ORM models.
+
+Repositories should translate between infrastructure persistence models and domain entities at the infrastructure boundary.
+
+Database schema should reflect actual current capabilities, not hypothetical future features.
+
+Do not create tables for future functionality merely because the system vision mentions those concepts.
+
+Testing may use lightweight databases such as in-memory SQLite where appropriate for isolated unit tests, but PostgreSQL-specific behavior must be validated with PostgreSQL integration testing.
+
+A successful SQLite test does not prove PostgreSQL compatibility.
+
+Database tooling or hosting-provider requirements must not automatically become Kondooit's architectural requirements.
+
+For example, if a development platform requires RLS, that does not by itself mean RLS is a Kondooit domain or security architecture decision.
+
+---
+
+# 11. Authentication and Security
+
+Security mechanisms should be implemented behind appropriate boundaries.
+
+Password hashing, JWT libraries, database authentication mechanisms, and framework-specific authentication objects are infrastructure/API concerns, not domain concepts.
+
+Do not implement additional roles, permissions, multi-tenancy, profiles, or authorization systems unless the roadmap explicitly requires them.
+
+Do not over-engineer authentication for hypothetical future requirements.
+
+Security should be real and appropriate to the currently implemented functionality, while remaining architecturally extensible.
+
+Never weaken security simply to make tests or development easier.
+
+---
+
+# 12. Testing Philosophy
+
+Tests should protect architectural invariants, not merely implementation details.
+
+Prefer tests that establish facts such as:
+
+- domain does not import infrastructure
+- application does not directly instantiate infrastructure implementations
+- provider implementations satisfy capability interfaces
+- canonical entities are independent of ORM models
+- infrastructure adapters correctly translate to/from domain models
+- API boundaries remain client-neutral
+- future capabilities are not accidentally implemented
+
+Avoid brittle tests that lock architecture to incidental implementation details.
+
+For example, do not test that an interface has "exactly 9 methods" if the real invariant is that it remains metadata-only.
+
+Tests should protect the architectural rule, not freeze the current code.
+
+Use unit tests for fast isolated behavior and integration tests for actual infrastructure behavior.
+
+---
+
+# 13. Existing Applications Are Evidence, Not Authorities
+
+When analyzing Jellyfin, Sonarr, Radarr, Prowlarr, AIOStreams, Dispatcharr, Threadfin, NZBDAV, Decypharr, or any other project:
+
+Do not copy their architecture simply because it works for them.
+
+Determine:
+
+- what problem they solve
+- what capability they expose
+- what domain concepts are actually necessary
+- what is an implementation detail
+- what is an ecosystem workaround
+- what exists because of historical constraints
+- what exists because of integration with other applications
+- what genuinely belongs in Kondooit's architecture
+
+A concept's existence in another application does not imply that the concept belongs in Kondooit.
+
+Existing applications are evidence.
+
+They are not architectural authorities.
+
+---
+
+# 14. Avoid Ecosystem Workarounds Becoming Domain Concepts
+
+Be particularly suspicious of functionality that exists primarily because separate applications need to communicate.
+
+A workaround may be necessary in an ecosystem of independent applications but unnecessary in a unified system.
+
+Do not reproduce an ecosystem workaround as a first-class Kondooit domain capability without determining why it exists.
+
+Always distinguish:
+
+- genuine domain capability
+- implementation detail
+- infrastructure
+- UI behavior
+- integration adapter
+- ecosystem workaround
+- historical artifact
+
+This distinction is fundamental to the project.
+
+---
+
+# 15. Minimalism and Deliberate Complexity
+
+Prefer the smallest implementation that correctly satisfies the current architectural and functional requirements.
+
+Do not add:
+
+- speculative abstractions
+- unused interfaces
+- future database tables
+- placeholder services
+- unnecessary configuration systems
+- generalized frameworks
+- duplicate layers
+- premature optimization
+
+However, do not collapse meaningful architectural boundaries merely to reduce the number of files.
+
+The goal is not "fewest lines of code."
+
+The goal is:
+
+"minimum complexity necessary to preserve a coherent architecture."
+
+---
+
+# 16. When You Discover a Problem
+
+Do not silently work around architectural conflicts.
+
+If you discover:
+
+- an ADR conflict
+- a scope conflict
+- an unclear domain boundary
+- a provider abstraction that is too broad
+- a technology leaking across a boundary
+- a future capability accidentally becoming implementation
+- a database or infrastructure requirement that changes architecture
+
+STOP and explain the issue.
+
+State:
+
+1. What was discovered.
+2. Which architectural rule or document it affects.
+3. Why the current implementation conflicts with it.
+4. What options exist.
+5. Which option you recommend.
+
+Do not make an architectural decision silently.
+
+---
+
+# 17. Implementation Discipline
+
+Before implementing a significant feature:
+
+1. Read the relevant governing documents.
+2. Identify the capability being implemented.
+3. Identify the correct architectural layer.
+4. Identify the interfaces/boundaries required.
+5. Confirm the feature is currently authorized.
+6. Implement the smallest coherent version.
+7. Add tests for both behavior and architectural boundaries.
+8. Validate the implementation.
+9. Report anything that could not be validated.
+
+Do not claim something is validated when it was only statically inspected.
+
+Clearly distinguish:
+
+- implemented
+- unit tested
+- integration tested
+- manually tested
+- unavailable to test
+- blocked by environment
+
+---
+
+# 18. Change Management
+
+Do not make unrelated cleanup changes while implementing a feature.
+
+Do not refactor unrelated architecture simply because a different design would be preferable.
+
+Keep changes attributable to the current task.
+
+If a broader refactor is genuinely necessary, explain why before doing it.
+
+Do not modify accepted ADRs, architectural principles, or governing documentation merely to make the current implementation fit.
+
+The implementation should conform to the architecture unless the architecture itself is deliberately changed through the project's decision process.
+
+---
+
+# 19. Final Rule
+
+When in doubt:
+
+Do less.
+
+Ask rather than assume.
+
+Preserve the architectural boundary.
+
+Do not let the existence of a technology, library, provider, or existing application's implementation dictate Kondooit's design.
+
+Build the capability that is actually required, not the capability that might eventually be useful.
+
+The purpose of the architecture is to make future change possible without requiring future functionality to be implemented prematurely.

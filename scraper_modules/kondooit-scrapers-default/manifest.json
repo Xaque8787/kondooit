@@ -1,0 +1,29 @@
+{
+  "id": "kondooit-scrapers-default",
+  "name": "Kondooit Default Scrapers",
+  "version": "0.1.0",
+  "description": "Default scraper bundle — public torrent aggregators and sites",
+  "min_kondooit_version": "0.0.1",
+  "scrapers": [
+    {
+      "key": "torrentio",
+      "name": "Torrentio",
+      "type": "api",
+      "category": "aggregator",
+      "content_types": ["movie", "series"],
+      "tier": 1,
+      "default_enabled": true,
+      "config_schema": null
+    },
+    {
+      "key": "mediafusion",
+      "name": "MediaFusion",
+      "type": "api",
+      "category": "aggregator",
+      "content_types": ["movie", "series"],
+      "tier": 1,
+      "default_enabled": true,
+      "config_schema": null
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kondooit
+      POSTGRES_PASSWORD: kondooit
+      POSTGRES_DB: kondooit
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kondooit"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: ./server
+    ports:
+      - "8000:8000"
+    environment:
+      KONDOOIT_DATABASE_URL: "postgresql+asyncpg://kondooit:kondooit@db:5432/kondooit"
+      KONDOOIT_DEBUG: "true"
+    volumes:
+      - ./scraper_modules:/scraper_modules:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+    ports:
+      - "3000:80"
+    depends_on:
+      - server
+
+volumes:
+  pgdata:
