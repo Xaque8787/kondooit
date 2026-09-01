@@ -11,7 +11,7 @@ import logging
 from urllib.parse import quote
 
 import httpx
-from litestar import Controller, get, put, post, delete
+from litestar import Controller, Request, get, put, post, delete
 from litestar.response import Stream
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -183,6 +183,7 @@ class SourceProviderController(Controller):
     @get("/easynews/stream")
     async def easynews_stream(
         self,
+        request: Request,
         post_hash: str,
         filename: str,
         session: AsyncSession,
@@ -194,8 +195,7 @@ class SourceProviderController(Controller):
     ) -> Stream:
         """Proxy an Easynews download through the server with stored credentials.
 
-        Clients call this endpoint instead of hitting Easynews directly,
-        so they never need to handle authentication.
+        Supports HTTP range requests so browsers can seek and play video.
         """
         config = await source_provider_service.get_config(session, "easynews")
         if config is None or config.status != SourceProviderStatus.ENABLED:
@@ -217,18 +217,10 @@ class SourceProviderController(Controller):
         if sig:
             upstream_url += f"?sig={sig}&ns=N"
 
-        async def stream_generator():
-            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-                async with client.stream(
-                    "GET",
-                    upstream_url,
-                    auth=(username, password),
-                ) as resp:
-                    if resp.status_code != 200:
-                        logger.warning("Easynews upstream returned %d for %s", resp.status_code, post_hash)
-                        return
-                    async for chunk in resp.aiter_bytes(chunk_size=65536):
-                        yield chunk
+        upstream_headers: dict[str, str] = {}
+        range_header = request.headers.get("range")
+        if range_header:
+            upstream_headers["Range"] = range_header
 
         content_type = "video/mp4"
         if ext in ("mkv",):
@@ -240,13 +232,56 @@ class SourceProviderController(Controller):
         elif ext in ("webm",):
             content_type = "video/webm"
 
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, read=300.0),
+            follow_redirects=True,
+            auth=(username, password),
+        )
+
+        try:
+            upstream_resp = await client.send(
+                client.build_request("GET", upstream_url, headers=upstream_headers),
+                stream=True,
+            )
+        except Exception as e:
+            await client.aclose()
+            logger.error("Easynews upstream connection failed for %s: %s", post_hash, e)
+            from litestar.exceptions import ServiceUnavailableException
+            raise ServiceUnavailableException("Failed to connect to Easynews")
+
+        if upstream_resp.status_code not in (200, 206):
+            await upstream_resp.aclose()
+            await client.aclose()
+            logger.warning("Easynews upstream returned %d for %s", upstream_resp.status_code, post_hash)
+            from litestar.exceptions import ServiceUnavailableException
+            raise ServiceUnavailableException("Easynews returned an error")
+
+        response_headers: dict[str, str] = {
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Accept-Ranges": "bytes",
+        }
+        content_length = upstream_resp.headers.get("content-length")
+        if content_length:
+            response_headers["Content-Length"] = content_length
+        content_range = upstream_resp.headers.get("content-range")
+        if content_range:
+            response_headers["Content-Range"] = content_range
+
+        status_code = upstream_resp.status_code
+
+        async def stream_generator():
+            try:
+                async for chunk in upstream_resp.aiter_bytes(chunk_size=131072):
+                    yield chunk
+            finally:
+                await upstream_resp.aclose()
+                await client.aclose()
+
         return Stream(
             stream_generator(),
+            status_code=status_code,
             media_type=content_type,
-            headers={
-                "Content-Disposition": f'inline; filename="{filename}"',
-                "Accept-Ranges": "none",
-            },
+            headers=response_headers,
         )
 
     @get("/{key:str}")
@@ -446,18 +481,32 @@ class SourceProviderController(Controller):
 
         source_provider_service.scraper_manager.add_module(loaded)
 
+        scraper_responses = []
+        for s in loaded.scrapers:
+            schema = None
+            if s.config_schema:
+                schema = {
+                    k: ScraperConfigFieldSchema(
+                        type=v.get("type", "text"),
+                        label=v.get("label", k),
+                        description=v.get("description", ""),
+                        options=v.get("options"),
+                        default=v.get("default"),
+                    )
+                    for k, v in s.config_schema.items()
+                }
+            scraper_responses.append(ScraperInfoResponse(
+                key=s.key, name=s.name, tier=s.tier,
+                category=s.category, content_types=s.content_types, enabled=True,
+                config_schema=schema,
+            ))
+
         return ModuleInstallResponse(
             module_id=loaded.manifest.module_id,
             name=loaded.manifest.name,
             version=loaded.manifest.version,
             description=loaded.manifest.description,
-            scrapers=[
-                ScraperInfoResponse(
-                    key=s.key, name=s.name, tier=s.tier,
-                    category=s.category, content_types=s.content_types, enabled=True,
-                )
-                for s in loaded.scrapers
-            ],
+            scrapers=scraper_responses,
         )
 
     @delete("/scrapers/{module_id:str}")
