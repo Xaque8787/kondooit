@@ -11,9 +11,12 @@ API: https://members.easynews.com/2.0/search/solr
 
 from __future__ import annotations
 
+import logging
 import re
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from kondooit.application.source_provider_ports import (
     CredentialField,
@@ -106,8 +109,7 @@ class EasynewsProvider(SourceProvider):
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(
-                    EASYNEWS_SEARCH_URL,
-                    params=self._base_params("test"),
+                    self._build_search_url("test"),
                     auth=(username, password),
                 )
                 return resp.status_code == 200
@@ -124,39 +126,34 @@ class EasynewsProvider(SourceProvider):
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.get(
-                    EASYNEWS_SEARCH_URL,
-                    params=self._base_params(search_text),
+                    self._build_search_url(search_text),
                     auth=(username, password),
                 )
                 if resp.status_code != 200:
+                    logger.warning("Easynews search returned status %d", resp.status_code)
                     return []
                 data = resp.json()
-        except (httpx.HTTPError, httpx.TimeoutException, ValueError):
+        except (httpx.HTTPError, httpx.TimeoutException, ValueError) as e:
+            logger.error("Easynews search failed: %s", e)
             return []
 
-        return self._parse_results(data)
+        results = self._parse_results(data)
+        logger.info("Easynews search for %r returned %d results (raw items: %d)",
+                     search_text, len(results), len(data.get("data", [])))
+        return results
 
     @staticmethod
-    def _base_params(query: str) -> dict[str, str]:
-        return {
-            "st": "adv",
-            "sb": "1",
-            "gps": query,
-            "fex": ",".join(VIDEO_EXTENSIONS),
-            "fty[]": "VIDEO",
-            "spamf": "1",
-            "u": "1",
-            "gx": "1",
-            "pno": "1",
-            "pby": "100",
-            "s1": "relevance",
-            "s1d": "-",
-            "s2": "dsize",
-            "s2d": "-",
-            "s3": "dtime",
-            "s3d": "-",
-            "sS": "3",
-        }
+    def _build_search_url(query: str) -> str:
+        from urllib.parse import quote
+        fex = ",".join(VIDEO_EXTENSIONS)
+        q = quote(query, safe="")
+        return (
+            f"{EASYNEWS_SEARCH_URL}"
+            f"?st=adv&sb=1&gps={q}"
+            f"&fex={fex}&fty[]=VIDEO"
+            f"&spamf=1&u=1&gx=1&pno=1&pby=100"
+            f"&s1=relevance&s1d=-&s2=dsize&s2d=-&s3=dtime&s3d=-&sS=3"
+        )
 
     @staticmethod
     def _parse_results(data: dict) -> list[SourceResult]:
