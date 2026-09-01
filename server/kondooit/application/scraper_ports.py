@@ -17,12 +17,13 @@ from typing import Protocol, runtime_checkable
 
 @dataclass(frozen=True)
 class ScraperResult:
-    """A single hash discovered by a scraper."""
-    info_hash: str
-    title: str
+    """A single result discovered by a scraper -- torrent hash or direct URL."""
+    info_hash: str = ""
+    title: str = ""
     size_bytes: int | None = None
     seeders: int | None = None
     source: str = ""
+    stream_url: str = ""
 
 
 @runtime_checkable

@@ -49,11 +49,12 @@ def parse_seeders(text: str) -> int | None:
 
 @dataclass(frozen=True)
 class ScraperResult:
-    info_hash: str
-    title: str
+    info_hash: str = ""
+    title: str = ""
     size_bytes: int | None = None
     seeders: int | None = None
     source: str = ""
+    stream_url: str = ""
 
 
 def _extract_hash(stream: dict) -> str | None:
@@ -96,21 +97,29 @@ def parse_stremio_streams(streams: list[dict], source_label: str) -> list[Scrape
 
     for stream in streams:
         info_hash = _extract_hash(stream)
-        if not info_hash:
-            continue
-
         raw_title = stream.get("title", "") or stream.get("name", "")
         size_bytes = parse_size_bytes(raw_title)
         seeders = parse_seeders(raw_title)
-        display_title = raw_title.split("\n")[0].strip() if raw_title else info_hash
+        display_title = raw_title.split("\n")[0].strip() if raw_title else (info_hash or "Unknown")
 
-        results.append(ScraperResult(
-            info_hash=info_hash.lower(),
-            title=display_title,
-            size_bytes=size_bytes,
-            seeders=seeders,
-            source=source_label,
-        ))
+        if info_hash:
+            results.append(ScraperResult(
+                info_hash=info_hash.lower(),
+                title=display_title,
+                size_bytes=size_bytes,
+                seeders=seeders,
+                source=source_label,
+            ))
+        else:
+            url = stream.get("url", "")
+            if url and url.startswith("http"):
+                results.append(ScraperResult(
+                    title=display_title,
+                    size_bytes=size_bytes,
+                    seeders=seeders,
+                    source=source_label,
+                    stream_url=url,
+                ))
 
     return results
 

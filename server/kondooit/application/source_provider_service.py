@@ -321,6 +321,18 @@ class SourceProviderService:
             cached_hashes = {r.info_hash.lower() for r in cache_results if r.info_hash}
 
         for sr in scraper_results:
+            if sr.stream_url and not sr.info_hash:
+                all_results.append(SourceResult(
+                    provider_key=sr.source,
+                    filename=sr.title,
+                    size_bytes=sr.size_bytes or 0,
+                    quality=_detect_quality(sr.title),
+                    codec=_detect_codec(sr.title),
+                    source_type="direct",
+                    scraper_source=sr.source,
+                    stream_url=sr.stream_url,
+                ))
+                continue
             h = sr.info_hash.lower()
             if h in cached_hashes:
                 continue
@@ -437,18 +449,22 @@ class SourceProviderService:
 
         task_results = await asyncio.gather(*tasks, return_exceptions=True)
         seen_hashes: dict[str, ScraperResult] = {}
+        url_results: list[ScraperResult] = []
 
         for r in task_results:
             if isinstance(r, BaseException):
                 logger.warning("Scraper failed: %s", r)
                 continue
             for result in r:
-                h = result.info_hash.lower()
-                if h not in seen_hashes:
-                    seen_hashes[h] = result
+                if result.info_hash:
+                    h = result.info_hash.lower()
+                    if h not in seen_hashes:
+                        seen_hashes[h] = result
+                elif result.stream_url:
+                    url_results.append(result)
 
-        logger.info("Scrapers returned %d unique hashes", len(seen_hashes))
-        return list(seen_hashes.values())
+        logger.info("Scrapers returned %d unique hashes + %d direct URLs", len(seen_hashes), len(url_results))
+        return list(seen_hashes.values()) + url_results
 
     @staticmethod
     async def _run_single_scraper_movie(
