@@ -27,6 +27,9 @@ from kondooit.application.source_provider_ports import (
     SourceSearchRequest,
 )
 
+EPISODE_PATTERN = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,3})")
+SEASON_PACK_THRESHOLD = 3
+
 if TYPE_CHECKING:
     from kondooit.application.ports import AsyncSessionProtocol
     from kondooit.infrastructure.scraper_loader import LoadedModule, LoadedScraper
@@ -203,6 +206,8 @@ class SourceProviderService:
         provider_key: str,
         info_hash: str,
         file_index: int | None = None,
+        season: int | None = None,
+        episode: int | None = None,
     ) -> dict:
         """Resolve a hash to a playable stream URL via a debrid provider."""
         config = await self._config_repo.get(session, provider_key)
@@ -211,7 +216,7 @@ class SourceProviderService:
         provider = self._registry.get(provider_key)
         if provider is None or not hasattr(provider, "resolve"):
             return {"success": False, "detail": f"Provider '{provider_key}' does not support resolve"}
-        return await provider.resolve(config, info_hash, file_index)
+        return await provider.resolve(config, info_hash, file_index, season=season, episode=episode)
 
     async def add_torrent(
         self, session: "AsyncSessionProtocol", provider_key: str, info_hash: str
@@ -283,18 +288,22 @@ class SourceProviderService:
         if scraper_results:
             cache_task = self._run_cache_checks(enabled_configs, scraper_results)
             library_task = self._fetch_library_hashes(enabled_configs)
-            cache_results, lib_hashes = await asyncio.gather(
+            raw_cache, lib_hashes = await asyncio.gather(
                 cache_task, library_task, return_exceptions=True,
             )
-            if isinstance(cache_results, BaseException):
-                logger.error("Cache check pipeline failed: %s", cache_results)
-                cache_results = []
+            if isinstance(raw_cache, BaseException):
+                logger.error("Cache check pipeline failed: %s", raw_cache)
+                raw_cache = []
             if isinstance(lib_hashes, BaseException):
                 logger.error("Library hash fetch failed: %s", lib_hashes)
                 lib_hashes = set()
+            library_hashes = lib_hashes
+
+            cache_results = self._collapse_cache_results(
+                raw_cache, scraper_results, library_hashes, query,
+            )
             all_results.extend(cache_results)
             cached_hashes = {r.info_hash.lower() for r in cache_results if r.info_hash}
-            library_hashes = lib_hashes
 
         for sr in scraper_results:
             h = sr.info_hash.lower()
@@ -313,7 +322,7 @@ class SourceProviderService:
                 scraper_source=sr.source,
             ))
 
-        source_type_order = {"direct": 0, "cached_torrent": 1, "in_library": 2, "uncached_torrent": 3}
+        source_type_order = {"direct": 0, "in_library": 1, "cached_torrent": 2, "uncached_torrent": 3}
         quality_order = {"2160p": 0, "1080p": 1, "720p": 2, "480p": 3, "": 4}
         all_results.sort(
             key=lambda r: (
@@ -448,6 +457,84 @@ class SourceProviderService:
             )
         except asyncio.TimeoutError:
             return []
+
+    def _collapse_cache_results(
+        self,
+        raw_results: list[SourceResult],
+        scraper_results: list[ScraperResult],
+        library_hashes: set[str],
+        query: SourceSearchRequest,
+    ) -> list[SourceResult]:
+        """Collapse per-file cache results into per-hash entries.
+
+        Multi-file hashes (season packs) become a single result with
+        is_season_pack=True. The source_type is upgraded to 'in_library'
+        when the hash is already on the user's debrid account.
+        """
+        hash_to_scraper: dict[str, ScraperResult] = {
+            r.info_hash.lower(): r for r in scraper_results
+        }
+
+        groups: dict[tuple[str, str], list[SourceResult]] = {}
+        for r in raw_results:
+            key = (r.info_hash.lower() if r.info_hash else "", r.provider_key)
+            groups.setdefault(key, []).append(r)
+
+        collapsed: list[SourceResult] = []
+        for (info_hash, provider_key), files in groups.items():
+            in_library = info_hash in library_hashes
+            source_type = "in_library" if in_library else "cached_torrent"
+            scraper_info = hash_to_scraper.get(info_hash)
+            seeders = scraper_info.seeders if scraper_info else None
+            scraper_source = scraper_info.source if scraper_info else None
+
+            video_files = [f for f in files if f.size_bytes > 0]
+            if not video_files:
+                video_files = files
+
+            is_pack = len(video_files) >= SEASON_PACK_THRESHOLD
+
+            if is_pack:
+                total_size = sum(f.size_bytes for f in video_files)
+                pack_name = scraper_info.title if scraper_info else video_files[0].filename
+                best_quality = ""
+                best_codec = ""
+                for f in video_files:
+                    q = _detect_quality(f.filename)
+                    c = _detect_codec(f.filename)
+                    if q and not best_quality:
+                        best_quality = q
+                    if c and not best_codec:
+                        best_codec = c
+
+                collapsed.append(SourceResult(
+                    provider_key=provider_key,
+                    filename=pack_name,
+                    size_bytes=total_size,
+                    quality=best_quality or _detect_quality(pack_name),
+                    codec=best_codec or _detect_codec(pack_name),
+                    info_hash=info_hash,
+                    seeders=seeders,
+                    source_type=source_type,
+                    scraper_source=scraper_source,
+                    is_season_pack=True,
+                    file_count=len(video_files),
+                ))
+            else:
+                for f in video_files:
+                    collapsed.append(SourceResult(
+                        provider_key=f.provider_key,
+                        filename=f.filename,
+                        size_bytes=f.size_bytes,
+                        quality=f.quality,
+                        codec=f.codec,
+                        info_hash=f.info_hash,
+                        seeders=seeders if seeders else f.seeders,
+                        source_type=source_type,
+                        scraper_source=scraper_source or f.scraper_source,
+                    ))
+
+        return collapsed
 
     async def _fetch_library_hashes(
         self, configs: list[SourceProviderConfig]

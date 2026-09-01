@@ -201,6 +201,8 @@ class EasynewsProvider(SourceProvider):
                     except (ValueError, IndexError):
                         pass
 
+            stream_url = _build_download_url(item, full_filename)
+
             results.append(SourceResult(
                 provider_key="easynews",
                 filename=full_filename,
@@ -208,6 +210,19 @@ class EasynewsProvider(SourceProvider):
                 quality=_detect_quality(full_filename),
                 codec=_detect_codec(full_filename),
                 duration_seconds=duration_seconds,
+                stream_url=stream_url,
             ))
 
         return results
+
+
+def _build_download_url(item: dict, filename: str) -> str | None:
+    """Build the direct download URL from Easynews result fields."""
+    hash_val = item.get("0", item.get("hash", ""))
+    sig = item.get("sig", "")
+    if not hash_val:
+        return None
+    from urllib.parse import quote
+    safe_name = quote(filename, safe="")
+    base = "https://members.easynews.com/dl"
+    return f"{base}/{hash_val}/{safe_name}?sig={sig}&ns=N" if sig else f"{base}/{hash_val}/{safe_name}"

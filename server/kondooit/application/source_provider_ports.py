@@ -94,8 +94,11 @@ class SourceResult:
     # Torrent-specific fields (populated by CACHE_CHECK results)
     info_hash: str | None = None
     seeders: int | None = None
-    source_type: str = "direct"  # "direct", "cached_torrent"
+    source_type: str = "direct"  # "direct", "cached_torrent", "in_library", "uncached_torrent"
     scraper_source: str | None = None  # which scraper discovered this hash
+    stream_url: str | None = None
+    is_season_pack: bool = False
+    file_count: int = 0
 
 
 class SourceProvider(ABC):
@@ -134,3 +137,10 @@ class CacheCheckResult:
     filename: str
     size_bytes: int
     file_index: int | None = None
+
+
+@dataclass(frozen=True)
+class CacheCheckGroup:
+    """All cached files for a single info_hash, grouped."""
+    info_hash: str
+    files: list[CacheCheckResult]

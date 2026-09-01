@@ -64,6 +64,8 @@ class ResolveRequest(BaseModel):
     info_hash: str
     provider_key: str = "torbox"
     file_index: int | None = None
+    season: int | None = None
+    episode: int | None = None
 
 
 class ResolveResponse(BaseModel):
@@ -93,6 +95,9 @@ class SourceResultResponse(BaseModel):
     seeders: int | None = None
     source_type: str = "direct"
     scraper_source: str | None = None
+    stream_url: str | None = None
+    is_season_pack: bool = False
+    file_count: int = 0
 
 
 class ScraperInfoResponse(BaseModel):
@@ -245,6 +250,9 @@ class SourceProviderController(Controller):
                 seeders=r.seeders,
                 source_type=r.source_type,
                 scraper_source=r.scraper_source,
+                stream_url=r.stream_url,
+                is_season_pack=r.is_season_pack,
+                file_count=r.file_count,
             )
             for r in results
         ]
@@ -268,6 +276,7 @@ class SourceProviderController(Controller):
     ) -> ResolveResponse:
         result = await source_provider_service.resolve_stream(
             session, data.provider_key, data.info_hash, data.file_index,
+            season=data.season, episode=data.episode,
         )
         return ResolveResponse(
             success=result.get("success", False),

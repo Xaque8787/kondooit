@@ -12,6 +12,7 @@ Authentication: Bearer token (API key)
 from __future__ import annotations
 
 import logging
+import re
 
 import httpx
 
@@ -233,11 +234,17 @@ class TorboxProvider(SourceProvider):
         return hashes
 
     async def resolve(
-        self, config: SourceProviderConfig, info_hash: str, file_index: int | None = None,
+        self,
+        config: SourceProviderConfig,
+        info_hash: str,
+        file_index: int | None = None,
+        season: int | None = None,
+        episode: int | None = None,
     ) -> dict:
         """Resolve a cached hash to a playable download URL.
 
         Flow: create/find torrent on account -> pick the right file -> request download link.
+        When season+episode are provided, smart-match the episode file from a season pack.
         """
         api_key = config.credentials.get("api_key", "")
         if not api_key:
@@ -250,7 +257,6 @@ class TorboxProvider(SourceProvider):
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                # Step 1: add torrent (instant for cached content)
                 create_resp = await client.post(
                     f"{TORBOX_API_BASE}/torrents/createtorrent",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -268,15 +274,15 @@ class TorboxProvider(SourceProvider):
                 if not torrent_id:
                     return {"success": False, "detail": "No torrent ID returned from createtorrent"}
 
-                # Step 2: pick the right file
                 resolved_file_id = file_index
                 if resolved_file_id is None:
-                    resolved_file_id = await self._pick_largest_video_file(client, api_key, torrent_id)
+                    resolved_file_id = await self._pick_video_file(
+                        client, api_key, torrent_id, season=season, episode=episode,
+                    )
 
                 if resolved_file_id is None:
                     return {"success": False, "detail": "No video file found in torrent"}
 
-                # Step 3: request download link
                 dl_resp = await client.get(
                     f"{TORBOX_API_BASE}/torrents/requestdl",
                     params={"token": api_key, "torrent_id": str(torrent_id), "file_id": str(resolved_file_id), "zip_link": "false"},
@@ -296,10 +302,20 @@ class TorboxProvider(SourceProvider):
         except (httpx.HTTPError, httpx.TimeoutException, ValueError) as e:
             return {"success": False, "detail": str(e)}
 
-    async def _pick_largest_video_file(
-        self, client: httpx.AsyncClient, api_key: str, torrent_id: int
+    async def _pick_video_file(
+        self,
+        client: httpx.AsyncClient,
+        api_key: str,
+        torrent_id: int,
+        season: int | None = None,
+        episode: int | None = None,
     ) -> int | None:
-        """Get torrent info and pick the largest video file."""
+        """Pick the right video file from a torrent.
+
+        When season+episode are provided, tries to match the specific
+        episode file by parsing SxxExx from filenames. Falls back to
+        largest video file if no episode match is found.
+        """
         try:
             resp = await client.get(
                 f"{TORBOX_API_BASE}/torrents/mylist",
@@ -317,21 +333,55 @@ class TorboxProvider(SourceProvider):
                 return None
 
             files = torrent_data.get("files", [])
-            best_id = None
-            best_size = 0
+            video_files: list[dict] = []
             for f in files:
                 name = f.get("name", "") or f.get("short_name", "")
                 ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-                if ext not in VIDEO_EXTS:
-                    continue
+                if ext in VIDEO_EXTS and f.get("id") is not None:
+                    video_files.append(f)
+
+            if not video_files:
+                return None
+
+            if season is not None and episode is not None:
+                matched = self._match_episode_file(video_files, season, episode)
+                if matched is not None:
+                    return matched
+
+            best_id = None
+            best_size = 0
+            for f in video_files:
                 size = f.get("size", 0) or 0
-                fid = f.get("id")
-                if fid is not None and size > best_size:
+                if size > best_size:
                     best_size = size
-                    best_id = fid
+                    best_id = f["id"]
             return best_id
         except (httpx.HTTPError, httpx.TimeoutException, ValueError):
             return None
+
+    @staticmethod
+    def _match_episode_file(
+        video_files: list[dict], season: int, episode: int
+    ) -> int | None:
+        """Match the specific episode file from a list of video files."""
+        ep_pattern = re.compile(
+            rf"[Ss]0*{season}[Ee]0*{episode}(?![0-9])"
+        )
+        bare_ep_pattern = re.compile(
+            rf"(?:^|[\W_])E0*{episode}(?![0-9])", re.IGNORECASE
+        )
+
+        for f in video_files:
+            name = f.get("name", "") or f.get("short_name", "")
+            if ep_pattern.search(name):
+                return f["id"]
+
+        for f in video_files:
+            name = f.get("name", "") or f.get("short_name", "")
+            if bare_ep_pattern.search(name):
+                return f["id"]
+
+        return None
 
     async def add_torrent(self, config: SourceProviderConfig, magnet_or_hash: str) -> dict:
         """Add a torrent to the user's TorBox account by magnet link or info_hash.

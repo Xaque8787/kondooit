@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import { api } from "../api";
 import type { SourceResult } from "../types";
 
@@ -32,7 +32,6 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
   const [addedHashes, setAddedHashes] = useState<Set<string>>(new Set());
   const [resolvingHash, setResolvingHash] = useState<string | null>(null);
   const [streamUrls, setStreamUrls] = useState<Record<string, string>>({});
-  const [playingHash, setPlayingHash] = useState<string | null>(null);
 
   const handleSearch = async () => {
     setSearching(true);
@@ -40,7 +39,6 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
     setResults(null);
     setAddedHashes(new Set());
     setStreamUrls({});
-    setPlayingHash(null);
     try {
       const res = await api.searchSources(title, year, season, episode, tmdbId, contentType);
       setResults(res);
@@ -71,7 +69,7 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
     setResolvingHash(infoHash);
     setError("");
     try {
-      const res = await api.resolveStream(infoHash, providerKey);
+      const res = await api.resolveStream(infoHash, providerKey, undefined, season, episode);
       if (res.success && res.stream_url) {
         setStreamUrls(prev => ({ ...prev, [infoHash]: res.stream_url! }));
       } else {
@@ -134,10 +132,7 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
                     result={r}
                     onResolve={r.info_hash ? () => handleResolve(r.info_hash!, r.provider_key) : undefined}
                     resolving={r.info_hash === resolvingHash}
-                    streamUrl={r.info_hash ? streamUrls[r.info_hash] : undefined}
-                    isPlaying={r.info_hash === playingHash}
-                    onPlay={r.info_hash ? () => setPlayingHash(r.info_hash) : undefined}
-                    onClosePlayer={() => setPlayingHash(null)}
+                    streamUrl={r.stream_url || (r.info_hash ? streamUrls[r.info_hash] : undefined)}
                   />
                 ))}
               </div>
@@ -174,7 +169,7 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
   );
 }
 
-function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, streamUrl, isPlaying, onPlay, onClosePlayer }: {
+function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, streamUrl }: {
   result: SourceResult;
   onAdd?: () => void;
   adding?: boolean;
@@ -182,11 +177,7 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
   onResolve?: () => void;
   resolving?: boolean;
   streamUrl?: string;
-  isPlaying?: boolean;
-  onPlay?: () => void;
-  onClosePlayer?: () => void;
 }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
@@ -196,6 +187,10 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
       setTimeout(() => setCopied(false), 2000);
     }
   };
+
+  const hasPreResolvedUrl = !!r.stream_url;
+  const resolvedUrl = streamUrl;
+  const needsResolve = !hasPreResolvedUrl && onResolve && !resolvedUrl;
 
   return (
     <div className="flex flex-col gap-2 p-3 rounded-lg bg-ink-900/50 border border-ink-800/50">
@@ -215,14 +210,19 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
                 {r.codec}
               </span>
             )}
-            {r.source_type === "cached_torrent" && (
-              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-600/20 text-emerald-400">
-                Cached
+            {r.is_season_pack && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-violet-600/20 text-violet-400">
+                Season Pack &middot; {r.file_count} episodes
               </span>
             )}
             {r.source_type === "in_library" && (
               <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-sky-600/20 text-sky-400">
                 In Library
+              </span>
+            )}
+            {r.source_type === "cached_torrent" && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-600/20 text-emerald-400">
+                Cached
               </span>
             )}
             {r.source_type === "uncached_torrent" && (
@@ -235,7 +235,7 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
                 {formatSize(r.size_bytes)}
               </span>
             )}
-            {r.duration_seconds && (
+            {r.duration_seconds != null && r.duration_seconds > 0 && (
               <span className="text-[10px] text-ink-500">
                 {formatDuration(r.duration_seconds)}
               </span>
@@ -258,7 +258,7 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
           </div>
         </div>
         <div className="shrink-0 flex items-center gap-2">
-          {onResolve && !streamUrl && (
+          {needsResolve && (
             <button
               onClick={onResolve}
               disabled={resolving}
@@ -304,77 +304,22 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
         </div>
       </div>
 
-      {/* Stream controls bar */}
-      {streamUrl && !isPlaying && (
-        <div className="flex items-center gap-2 px-2 py-2 rounded bg-emerald-950/40 border border-emerald-800/30">
-          <button
-            onClick={onPlay}
-            className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-400 hover:text-emerald-300 transition-colors"
-          >
-            <svg className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
-              <path d="M8 5v14l11-7z" />
-            </svg>
-            Play
-          </button>
-          <span className="text-ink-700">|</span>
+      {resolvedUrl && (
+        <div className="flex items-center gap-3 px-2 py-2 rounded bg-emerald-950/40 border border-emerald-800/30">
           <button
             onClick={handleCopy}
-            className="text-[10px] text-ink-400 hover:text-ink-200 transition-colors"
-            title="Copy stream URL"
+            className="text-[11px] font-medium text-emerald-400 hover:text-emerald-300 transition-colors"
           >
             {copied ? "Copied!" : "Copy URL"}
           </button>
-          <span className="text-ink-700">|</span>
           <a
-            href={streamUrl}
+            href={resolvedUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-[10px] text-ink-400 hover:text-ink-200 transition-colors"
-            title="Open in external player"
+            className="text-[11px] font-medium text-ink-400 hover:text-ink-200 transition-colors"
           >
-            External player
+            Open in browser
           </a>
-        </div>
-      )}
-
-      {/* Inline video player */}
-      {streamUrl && isPlaying && (
-        <div className="rounded overflow-hidden bg-black border border-ink-800/50">
-          <div className="flex items-center justify-between px-2 py-1 bg-ink-900/80">
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleCopy}
-                className="text-[10px] text-ink-400 hover:text-ink-200 transition-colors"
-              >
-                {copied ? "Copied!" : "Copy URL"}
-              </button>
-              <a
-                href={streamUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[10px] text-ink-400 hover:text-ink-200 transition-colors"
-              >
-                External player
-              </a>
-            </div>
-            <button
-              onClick={onClosePlayer}
-              className="text-[10px] text-ink-400 hover:text-ink-200 transition-colors px-1"
-              title="Close player"
-            >
-              Close
-            </button>
-          </div>
-          <video
-            ref={videoRef}
-            src={streamUrl}
-            controls
-            autoPlay
-            className="w-full max-h-[60vh]"
-            onLoadedData={() => videoRef.current?.play()}
-          >
-            Your browser does not support video playback.
-          </video>
         </div>
       )}
     </div>
