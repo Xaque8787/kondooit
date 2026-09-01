@@ -310,6 +310,14 @@ export interface SourceResult {
   file_count: number;
 }
 
+export interface ScraperConfigFieldSchema {
+  type: string;
+  label: string;
+  description: string;
+  options?: string[];
+  default?: string;
+}
+
 export interface ScraperInfo {
   key: string;
   name: string;
@@ -317,6 +325,8 @@ export interface ScraperInfo {
   category: string;
   content_types: string[];
   enabled: boolean;
+  config_schema?: Record<string, ScraperConfigFieldSchema> | null;
+  config?: Record<string, string> | null;
 }
 
 export interface ScraperModule {

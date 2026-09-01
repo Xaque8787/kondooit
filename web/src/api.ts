@@ -229,9 +229,9 @@ export const api = {
   uninstallScraperModule: (moduleId: string) =>
     request<void>(`/source-providers/scrapers/${moduleId}`, { method: "DELETE" }),
 
-  toggleScraper: (key: string, enabled: boolean) =>
+  toggleScraper: (key: string, enabled: boolean, config?: Record<string, string> | null) =>
     request<import("./types").ScraperInfo>(`/source-providers/scrapers/${key}`, {
       method: "PUT",
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify({ enabled, config: config ?? null }),
     }),
 };

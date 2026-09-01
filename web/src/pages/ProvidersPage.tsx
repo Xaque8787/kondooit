@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { api } from "../api";
 import type {
   ProviderConfig,
   ProviderInfo,
   ScraperModule,
+  ScraperInfo,
   SourceProviderConfig,
   SourceProviderInfo,
 } from "../types";
@@ -373,6 +374,147 @@ function SourceProviderSection() {
   );
 }
 
+function Tooltip({ text, children }: { text: string; children: React.ReactNode }) {
+  const [visible, setVisible] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  return (
+    <div className="relative inline-flex" ref={ref}>
+      <div
+        onMouseEnter={() => setVisible(true)}
+        onMouseLeave={() => setVisible(false)}
+      >
+        {children}
+      </div>
+      {visible && (
+        <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 text-xs text-ink-100 bg-ink-800 border border-ink-700 rounded-lg shadow-lg max-w-56 whitespace-normal pointer-events-none">
+          {text}
+          <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px w-0 h-0 border-x-4 border-x-transparent border-t-4 border-t-ink-700" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScraperRow({
+  scraper,
+  onToggle,
+}: {
+  scraper: ScraperInfo;
+  onToggle: (key: string, enabled: boolean, config?: Record<string, string> | null) => void;
+}) {
+  const schema = scraper.config_schema;
+  const hasSettings = schema && Object.keys(schema).length > 0;
+  const [expanded, setExpanded] = useState(false);
+  const [localConfig, setLocalConfig] = useState<Record<string, string>>(() => {
+    if (!schema) return {};
+    const initial: Record<string, string> = {};
+    for (const [k, field] of Object.entries(schema)) {
+      initial[k] = scraper.config?.[k] ?? field.default ?? "";
+    }
+    return initial;
+  });
+  const [dirty, setDirty] = useState(false);
+
+  const handleFieldChange = (fieldKey: string, value: string) => {
+    setLocalConfig((prev) => ({ ...prev, [fieldKey]: value }));
+    setDirty(true);
+  };
+
+  const handleSave = () => {
+    onToggle(scraper.key, scraper.enabled, localConfig);
+    setDirty(false);
+  };
+
+  return (
+    <div className="rounded-lg bg-ink-900/50 border border-ink-800/50 overflow-hidden">
+      <div className="flex items-center justify-between p-3">
+        <div className="flex items-center gap-3">
+          {hasSettings && (
+            <button
+              onClick={() => setExpanded(!expanded)}
+              className="text-ink-500 hover:text-ink-300 transition-colors"
+              aria-label="Toggle settings"
+            >
+              <svg
+                className={`w-4 h-4 transition-transform ${expanded ? "rotate-90" : ""}`}
+                fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          )}
+          <span className="text-sm font-medium text-ink-200">{scraper.name}</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-ink-800/60 text-ink-500">
+            {scraper.category}
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-ink-800/60 text-ink-500">
+            tier {scraper.tier}
+          </span>
+        </div>
+        <button
+          onClick={() => onToggle(scraper.key, !scraper.enabled)}
+          className={`relative w-10 h-5 rounded-full transition-colors ${
+            scraper.enabled ? "bg-brand-600" : "bg-ink-700"
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+              scraper.enabled ? "translate-x-5" : "translate-x-0"
+            }`}
+          />
+        </button>
+      </div>
+
+      {expanded && hasSettings && (
+        <div className="border-t border-ink-800/50 px-4 py-3 space-y-3 bg-ink-950/30">
+          {Object.entries(schema).map(([fieldKey, field]) => (
+            <div key={fieldKey}>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <label className="text-xs font-medium text-ink-300">{field.label}</label>
+                {field.description && (
+                  <Tooltip text={field.description}>
+                    <svg
+                      className="w-3.5 h-3.5 text-ink-500 hover:text-ink-300 cursor-help transition-colors"
+                      fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </Tooltip>
+                )}
+              </div>
+              {field.type === "select" && field.options ? (
+                <select
+                  value={localConfig[fieldKey] ?? field.default ?? ""}
+                  onChange={(e) => handleFieldChange(fieldKey, e.target.value)}
+                  className="input text-sm py-1.5"
+                >
+                  {field.options.map((opt) => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={localConfig[fieldKey] ?? ""}
+                  onChange={(e) => handleFieldChange(fieldKey, e.target.value)}
+                  placeholder={field.default ?? ""}
+                  className="input text-sm py-1.5"
+                />
+              )}
+            </div>
+          ))}
+          {dirty && (
+            <button onClick={handleSave} className="btn-primary text-xs px-3 py-1.5">
+              Save settings
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SourceResolverSection() {
   const [modules, setModules] = useState<ScraperModule[]>([]);
   const [loading, setLoading] = useState(true);
@@ -423,19 +565,19 @@ function SourceResolverSection() {
     }
   };
 
-  const handleToggle = async (key: string, enabled: boolean) => {
+  const handleToggle = async (key: string, enabled: boolean, config?: Record<string, string> | null) => {
     try {
-      const updated = await api.toggleScraper(key, enabled);
+      const updated = await api.toggleScraper(key, enabled, config);
       setModules((prev) =>
         prev.map((m) => ({
           ...m,
           scrapers: m.scrapers.map((s) =>
-            s.key === key ? { ...s, enabled: updated.enabled } : s
+            s.key === key ? { ...s, enabled: updated.enabled, config: updated.config } : s
           ),
         }))
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Toggle failed");
+      setError(err instanceof Error ? err.message : "Save failed");
     }
   };
 
@@ -502,32 +644,11 @@ function SourceResolverSection() {
               </div>
               <div className="space-y-2">
                 {mod.scrapers.map((scraper) => (
-                  <div
+                  <ScraperRow
                     key={scraper.key}
-                    className="flex items-center justify-between p-3 rounded-lg bg-ink-900/50 border border-ink-800/50"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className="text-sm font-medium text-ink-200">{scraper.name}</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-ink-800/60 text-ink-500">
-                        {scraper.category}
-                      </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-ink-800/60 text-ink-500">
-                        tier {scraper.tier}
-                      </span>
-                    </div>
-                    <button
-                      onClick={() => handleToggle(scraper.key, !scraper.enabled)}
-                      className={`relative w-10 h-5 rounded-full transition-colors ${
-                        scraper.enabled ? "bg-brand-600" : "bg-ink-700"
-                      }`}
-                    >
-                      <span
-                        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
-                          scraper.enabled ? "translate-x-5" : "translate-x-0"
-                        }`}
-                      />
-                    </button>
-                  </div>
+                    scraper={scraper}
+                    onToggle={handleToggle}
+                  />
                 ))}
               </div>
             </div>

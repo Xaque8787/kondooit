@@ -17,12 +17,14 @@
         "sort": {
           "type": "select",
           "label": "Sort by",
+          "description": "How results are ordered. Seeders finds the most-available torrents, Size finds the largest files, Quality prioritizes resolution.",
           "options": ["seeders", "size", "quality"],
           "default": "seeders"
         },
         "quality_filter": {
           "type": "select",
           "label": "Quality filter",
+          "description": "Minimum quality threshold. 'other' includes all qualities. Higher values exclude lower-resolution results.",
           "options": ["other", "480p", "720p", "1080p", "2160p", "scr", "cam"],
           "default": "other"
         }
@@ -40,6 +42,7 @@
         "stream_type": {
           "type": "select",
           "label": "Stream type",
+          "description": "Whether to return torrent magnet links or direct HTTP download links. Torrent is recommended for use with debrid services.",
           "options": ["torrent", "direct"],
           "default": "torrent"
         }

@@ -140,7 +140,8 @@ def create_app(settings: Settings | None = None) -> Litestar:
                 if loaded:
                     settings = await scraper_module_repo.list_settings(session, mod_record.module_id)
                     enabled_keys = {s.scraper_key for s in settings if s.enabled}
-                    scraper_manager.add_module(loaded, enabled_keys=enabled_keys)
+                    saved_configs = {s.scraper_key: s.config for s in settings if s.config}
+                    scraper_manager.add_module(loaded, enabled_keys=enabled_keys, saved_configs=saved_configs)
                     logger.info(
                         "Loaded installed module '%s' from %s (%d scrapers, enabled_keys=%s)",
                         mod_record.name, mod_record.source_path,

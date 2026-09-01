@@ -86,14 +86,20 @@ class ScraperModuleManager:
 
     Modules are installed explicitly by the admin (no auto-load).
     On startup, previously-installed modules are re-loaded from their
-    stored paths. Toggle state is persisted per-scraper.
+    stored paths. Toggle state and per-scraper config are persisted.
     """
 
     def __init__(self) -> None:
         self._modules: list[LoadedModule] = []
         self._enabled_scrapers: dict[str, LoadedScraper] = {}
+        self._scraper_configs: dict[str, dict] = {}
 
-    def add_module(self, module: "LoadedModule", enabled_keys: set[str] | None = None) -> None:
+    def add_module(
+        self,
+        module: "LoadedModule",
+        enabled_keys: set[str] | None = None,
+        saved_configs: dict[str, dict] | None = None,
+    ) -> None:
         """Add a loaded module. If enabled_keys provided and non-empty, use that for toggle state."""
         self._modules.append(module)
         for scraper in module.scrapers:
@@ -102,6 +108,8 @@ class ScraperModuleManager:
                     self._enabled_scrapers[scraper.key] = scraper
             elif scraper.default_enabled:
                 self._enabled_scrapers[scraper.key] = scraper
+            if saved_configs and scraper.key in saved_configs:
+                self._scraper_configs[scraper.key] = saved_configs[scraper.key]
 
     def remove_module(self, module_id: str) -> None:
         """Remove a module and all its scrapers from memory."""
@@ -109,6 +117,7 @@ class ScraperModuleManager:
         for m in to_remove:
             for s in m.scrapers:
                 self._enabled_scrapers.pop(s.key, None)
+                self._scraper_configs.pop(s.key, None)
             self._modules.remove(m)
 
     def get_modules(self) -> list["LoadedModule"]:
@@ -129,6 +138,12 @@ class ScraperModuleManager:
 
     def is_scraper_enabled(self, key: str) -> bool:
         return key in self._enabled_scrapers
+
+    def set_scraper_config(self, key: str, config: dict) -> None:
+        self._scraper_configs[key] = config
+
+    def get_scraper_config(self, key: str) -> dict | None:
+        return self._scraper_configs.get(key)
 
     def get_module_by_id(self, module_id: str) -> "LoadedModule | None":
         for m in self._modules:
@@ -402,17 +417,18 @@ class SourceProviderService:
         tasks = []
 
         for scraper in enabled:
+            scraper_config = self._scraper_manager.get_scraper_config(scraper.key)
             if query.content_type == "movie" and "movie" in scraper.content_types:
                 logger.info("Dispatching scraper '%s' for movie imdb=%s", scraper.key, imdb_id)
                 tasks.append(self._run_single_scraper_movie(
-                    scraper.instance, imdb_id, query.title, query.year or 0
+                    scraper.instance, imdb_id, query.title, query.year or 0, scraper_config,
                 ))
             elif query.content_type == "series" and "series" in scraper.content_types:
                 if query.season is not None and query.episode is not None:
                     logger.info("Dispatching scraper '%s' for episode imdb=%s S%02dE%02d", scraper.key, imdb_id, query.season, query.episode)
                     tasks.append(self._run_single_scraper_episode(
                         scraper.instance, imdb_id, query.title,
-                        query.season, query.episode,
+                        query.season, query.episode, scraper_config,
                     ))
 
         if not tasks:
@@ -436,11 +452,12 @@ class SourceProviderService:
 
     @staticmethod
     async def _run_single_scraper_movie(
-        scraper: Scraper, imdb_id: str, title: str, year: int
+        scraper: Scraper, imdb_id: str, title: str, year: int,
+        config: dict | None = None,
     ) -> list[ScraperResult]:
         try:
             return await asyncio.wait_for(
-                scraper.search_movie(imdb_id, title, year),
+                scraper.search_movie(imdb_id, title, year, config=config),
                 timeout=15.0,
             )
         except asyncio.TimeoutError:
@@ -448,11 +465,12 @@ class SourceProviderService:
 
     @staticmethod
     async def _run_single_scraper_episode(
-        scraper: Scraper, imdb_id: str, title: str, season: int, episode: int
+        scraper: Scraper, imdb_id: str, title: str, season: int, episode: int,
+        config: dict | None = None,
     ) -> list[ScraperResult]:
         try:
             return await asyncio.wait_for(
-                scraper.search_episode(imdb_id, title, season, episode),
+                scraper.search_episode(imdb_id, title, season, episode, config=config),
                 timeout=15.0,
             )
         except asyncio.TimeoutError:

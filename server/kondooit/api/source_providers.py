@@ -107,6 +107,14 @@ class SourceResultResponse(BaseModel):
     file_count: int = 0
 
 
+class ScraperConfigFieldSchema(BaseModel):
+    type: str
+    label: str
+    description: str
+    options: list[str] | None = None
+    default: str | None = None
+
+
 class ScraperInfoResponse(BaseModel):
     key: str
     name: str
@@ -114,6 +122,8 @@ class ScraperInfoResponse(BaseModel):
     category: str
     content_types: list[str]
     enabled: bool
+    config_schema: dict[str, ScraperConfigFieldSchema] | None = None
+    config: dict[str, str] | None = None
 
 
 class ScraperModuleResponse(BaseModel):
@@ -126,6 +136,7 @@ class ScraperModuleResponse(BaseModel):
 
 class ScraperToggleRequest(BaseModel):
     enabled: bool
+    config: dict[str, str] | None = None
 
 
 class ModuleInstallRequest(BaseModel):
@@ -364,28 +375,47 @@ class SourceProviderController(Controller):
     async def list_scrapers(
         self,
         source_provider_service: SourceProviderService,
+        session: AsyncSession,
+        scraper_module_repo: ScraperModuleRepository,
     ) -> list[ScraperModuleResponse]:
         modules = source_provider_service.scraper_manager.get_modules()
-        return [
-            ScraperModuleResponse(
+        result = []
+        for m in modules:
+            settings = await scraper_module_repo.list_settings(session, m.manifest.module_id)
+            settings_by_key = {s.scraper_key: s for s in settings}
+            scraper_responses = []
+            for s in m.scrapers:
+                saved = settings_by_key.get(s.key)
+                schema = None
+                if s.config_schema:
+                    schema = {
+                        k: ScraperConfigFieldSchema(
+                            type=v.get("type", "text"),
+                            label=v.get("label", k),
+                            description=v.get("description", ""),
+                            options=v.get("options"),
+                            default=v.get("default"),
+                        )
+                        for k, v in s.config_schema.items()
+                    }
+                scraper_responses.append(ScraperInfoResponse(
+                    key=s.key,
+                    name=s.name,
+                    tier=s.tier,
+                    category=s.category,
+                    content_types=s.content_types,
+                    enabled=source_provider_service.scraper_manager.is_scraper_enabled(s.key),
+                    config_schema=schema,
+                    config=saved.config if saved and saved.config else None,
+                ))
+            result.append(ScraperModuleResponse(
                 module_id=m.manifest.module_id,
                 name=m.manifest.name,
                 version=m.manifest.version,
                 description=m.manifest.description,
-                scrapers=[
-                    ScraperInfoResponse(
-                        key=s.key,
-                        name=s.name,
-                        tier=s.tier,
-                        category=s.category,
-                        content_types=s.content_types,
-                        enabled=source_provider_service.scraper_manager.is_scraper_enabled(s.key),
-                    )
-                    for s in m.scrapers
-                ],
-            )
-            for m in modules
-        ]
+                scrapers=scraper_responses,
+            ))
+        return result
 
     @post("/scrapers/install")
     async def install_module(
@@ -452,6 +482,8 @@ class SourceProviderController(Controller):
         scraper_module_repo: ScraperModuleRepository,
     ) -> ScraperInfoResponse:
         source_provider_service.scraper_manager.set_scraper_enabled(key, data.enabled)
+        if data.config is not None:
+            source_provider_service.scraper_manager.set_scraper_config(key, data.config)
 
         modules = source_provider_service.scraper_manager.get_modules()
         module_id = None
@@ -461,12 +493,25 @@ class SourceProviderController(Controller):
                     module_id = m.manifest.module_id
                     break
         if module_id:
-            await scraper_module_repo.save_setting(session, module_id, key, data.enabled)
+            saved_config = data.config if data.config is not None else source_provider_service.scraper_manager.get_scraper_config(key)
+            await scraper_module_repo.save_setting(session, module_id, key, data.enabled, saved_config)
             await session.commit()
 
         for m in modules:
             for s in m.scrapers:
                 if s.key == key:
+                    schema = None
+                    if s.config_schema:
+                        schema = {
+                            k: ScraperConfigFieldSchema(
+                                type=v.get("type", "text"),
+                                label=v.get("label", k),
+                                description=v.get("description", ""),
+                                options=v.get("options"),
+                                default=v.get("default"),
+                            )
+                            for k, v in s.config_schema.items()
+                        }
                     return ScraperInfoResponse(
                         key=s.key,
                         name=s.name,
@@ -474,6 +519,8 @@ class SourceProviderController(Controller):
                         category=s.category,
                         content_types=s.content_types,
                         enabled=data.enabled,
+                        config_schema=schema,
+                        config=data.config or source_provider_service.scraper_manager.get_scraper_config(key),
                     )
         return ScraperInfoResponse(
             key=key, name=key, tier=1, category="unknown",
