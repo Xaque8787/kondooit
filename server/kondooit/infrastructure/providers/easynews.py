@@ -201,7 +201,7 @@ class EasynewsProvider(SourceProvider):
                     except (ValueError, IndexError):
                         pass
 
-            stream_url = _build_download_url(item, full_filename)
+            stream_url = build_proxy_stream_url(item, full_filename)
 
             results.append(SourceResult(
                 provider_key="easynews",
@@ -216,13 +216,52 @@ class EasynewsProvider(SourceProvider):
         return results
 
 
-def _build_download_url(item: dict, filename: str) -> str | None:
-    """Build the direct download URL from Easynews result fields."""
-    hash_val = item.get("0", item.get("hash", ""))
-    sig = item.get("sig", "")
-    if not hash_val:
+def build_easynews_download_url(item: dict, filename: str) -> str | None:
+    """Build the upstream Easynews download URL from search result fields.
+
+    Uses dl_farm, dl_port, post_hash, and sig as documented in Umbrella's
+    source code. Returns the raw Easynews URL (requires Basic Auth).
+    """
+    post_hash = item.get("0", item.get("hash", ""))
+    if not post_hash:
         return None
     from urllib.parse import quote
+    dl_farm = item.get("farm", item.get("dl_farm", ""))
+    dl_port = item.get("port", item.get("dl_port", ""))
+    sig = item.get("sig", "")
+    ext_field = item.get("11", item.get("extension", ""))
+    ext = f".{ext_field.lstrip('.')}" if ext_field else ""
     safe_name = quote(filename, safe="")
-    base = "https://members.easynews.com/dl"
-    return f"{base}/{hash_val}/{safe_name}?sig={sig}&ns=N" if sig else f"{base}/{hash_val}/{safe_name}"
+    if dl_farm and dl_port:
+        base = f"https://{dl_farm}/dl/{dl_port}/{post_hash}{ext}/{safe_name}"
+    else:
+        base = f"https://members.easynews.com/dl/{post_hash}/{safe_name}"
+    if sig:
+        base += f"?sig={sig}&ns=N"
+    return base
+
+
+def build_proxy_stream_url(item: dict, filename: str) -> str | None:
+    """Build a server-relative proxy URL for an Easynews result.
+
+    The proxy endpoint on our server will fetch from Easynews with
+    the stored credentials, so clients never need auth details.
+    """
+    post_hash = item.get("0", item.get("hash", ""))
+    if not post_hash:
+        return None
+    from urllib.parse import quote, urlencode
+    params: dict[str, str] = {"post_hash": post_hash, "filename": filename}
+    dl_farm = item.get("farm", item.get("dl_farm", ""))
+    dl_port = item.get("port", item.get("dl_port", ""))
+    sig = item.get("sig", "")
+    ext_field = item.get("11", item.get("extension", ""))
+    if dl_farm:
+        params["dl_farm"] = dl_farm
+    if dl_port:
+        params["dl_port"] = dl_port
+    if sig:
+        params["sig"] = sig
+    if ext_field:
+        params["ext"] = ext_field.lstrip(".")
+    return f"/source-providers/easynews/stream?{urlencode(params)}"

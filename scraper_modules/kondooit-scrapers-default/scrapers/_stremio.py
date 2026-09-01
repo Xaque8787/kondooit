@@ -19,6 +19,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 HASH_PATTERN = re.compile(r"[a-fA-F0-9]{40}")
+MAGNET_HASH_PATTERN = re.compile(r"btih:([a-fA-F0-9]{40})", re.IGNORECASE)
 SIZE_PATTERN = re.compile(r"([\d.]+)\s*(GB|MB|TB)", re.IGNORECASE)
 SEEDERS_PATTERN = re.compile(r"👤\s*(\d+)")
 
@@ -55,20 +56,48 @@ class ScraperResult:
     source: str = ""
 
 
+def _extract_hash(stream: dict) -> str | None:
+    """Extract a 40-char hex info_hash from a Stremio stream object.
+
+    Tries in order: infoHash field, magnet URI in url field,
+    behaviorHints.bingeGroup, sources array entries.
+    """
+    raw = stream.get("infoHash", "")
+    if raw and HASH_PATTERN.fullmatch(raw):
+        return raw.lower()
+
+    url = stream.get("url", "")
+    if url:
+        m = MAGNET_HASH_PATTERN.search(url)
+        if m:
+            return m.group(1).lower()
+
+    bfield = stream.get("behaviorHints")
+    if isinstance(bfield, dict):
+        bh = bfield.get("bingeGroup", "")
+        m = HASH_PATTERN.search(bh)
+        if m:
+            return m.group(0).lower()
+
+    sources = stream.get("sources", [])
+    if isinstance(sources, list):
+        for s in sources:
+            src = s if isinstance(s, str) else ""
+            m = HASH_PATTERN.search(src)
+            if m:
+                return m.group(0).lower()
+
+    return None
+
+
 def parse_stremio_streams(streams: list[dict], source_label: str) -> list[ScraperResult]:
     """Parse a Stremio streams array into ScraperResults."""
     results: list[ScraperResult] = []
 
     for stream in streams:
-        info_hash = stream.get("infoHash", "")
-        if not info_hash or not HASH_PATTERN.match(info_hash):
-            bfield = stream.get("behaviorHints", {})
-            bh = bfield.get("bingeGroup", "") if isinstance(bfield, dict) else ""
-            hash_match = HASH_PATTERN.search(bh)
-            if hash_match:
-                info_hash = hash_match.group(0)
-            else:
-                continue
+        info_hash = _extract_hash(stream)
+        if not info_hash:
+            continue
 
         raw_title = stream.get("title", "") or stream.get("name", "")
         size_bytes = parse_size_bytes(raw_title)

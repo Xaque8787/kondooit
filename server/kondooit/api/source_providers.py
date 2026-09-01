@@ -7,7 +7,12 @@ search endpoint that runs scrapers + cache checks + direct search.
 
 from __future__ import annotations
 
+import logging
+from urllib.parse import quote
+
+import httpx
 from litestar import Controller, get, put, post, delete
+from litestar.response import Stream
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +20,8 @@ from kondooit.application.source_provider_ports import SourceProviderConfig, Sou
 from kondooit.application.source_provider_service import SourceProviderService, ScraperModuleManager
 from kondooit.infrastructure.scraper_loader import load_module
 from kondooit.infrastructure.scraper_module_repo import ScraperModuleRepository
+
+logger = logging.getLogger(__name__)
 
 
 class CredentialFieldResponse(BaseModel):
@@ -161,6 +168,75 @@ class SourceProviderController(Controller):
             )
             for p in providers
         ]
+
+    @get("/easynews/stream")
+    async def easynews_stream(
+        self,
+        post_hash: str,
+        filename: str,
+        session: AsyncSession,
+        source_provider_service: SourceProviderService,
+        dl_farm: str = "",
+        dl_port: str = "",
+        sig: str = "",
+        ext: str = "",
+    ) -> Stream:
+        """Proxy an Easynews download through the server with stored credentials.
+
+        Clients call this endpoint instead of hitting Easynews directly,
+        so they never need to handle authentication.
+        """
+        config = await source_provider_service.get_config(session, "easynews")
+        if config is None or config.status != SourceProviderStatus.ENABLED:
+            from litestar.exceptions import NotFoundException
+            raise NotFoundException("Easynews provider not configured")
+
+        username = config.credentials.get("username", "")
+        password = config.credentials.get("password", "")
+        if not username or not password:
+            from litestar.exceptions import NotFoundException
+            raise NotFoundException("Easynews credentials not configured")
+
+        ext_suffix = f".{ext}" if ext else ""
+        safe_name = quote(filename, safe="")
+        if dl_farm and dl_port:
+            upstream_url = f"https://{dl_farm}/dl/{dl_port}/{post_hash}{ext_suffix}/{safe_name}"
+        else:
+            upstream_url = f"https://members.easynews.com/dl/{post_hash}/{safe_name}"
+        if sig:
+            upstream_url += f"?sig={sig}&ns=N"
+
+        async def stream_generator():
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+                async with client.stream(
+                    "GET",
+                    upstream_url,
+                    auth=(username, password),
+                ) as resp:
+                    if resp.status_code != 200:
+                        logger.warning("Easynews upstream returned %d for %s", resp.status_code, post_hash)
+                        return
+                    async for chunk in resp.aiter_bytes(chunk_size=65536):
+                        yield chunk
+
+        content_type = "video/mp4"
+        if ext in ("mkv",):
+            content_type = "video/x-matroska"
+        elif ext in ("avi",):
+            content_type = "video/x-msvideo"
+        elif ext in ("ts", "m2ts"):
+            content_type = "video/mp2t"
+        elif ext in ("webm",):
+            content_type = "video/webm"
+
+        return Stream(
+            stream_generator(),
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'inline; filename="{filename}"',
+                "Accept-Ranges": "none",
+            },
+        )
 
     @get("/{key:str}")
     async def get_config(

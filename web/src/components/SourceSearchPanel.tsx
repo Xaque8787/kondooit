@@ -189,7 +189,7 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
   };
 
   const hasPreResolvedUrl = !!r.stream_url;
-  const resolvedUrl = streamUrl;
+  const resolvedUrl = streamUrl?.startsWith("/") ? `/api${streamUrl}` : streamUrl;
   const needsResolve = !hasPreResolvedUrl && onResolve && !resolvedUrl;
 
   return (
