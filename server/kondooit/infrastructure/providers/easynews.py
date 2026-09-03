@@ -6,13 +6,18 @@ URLs. No cache check or resolution step is needed.
 
 Capabilities: DIRECT_SEARCH
 Authentication: HTTP Basic Auth (username + password)
-API: https://members.easynews.com/2.0/search/solr
+API: https://members.easynews.com/2.0/search/solr-search/advanced
+
+URL construction verified against Umbrella (Kodi addon) source code:
+  stream_url = downURL + quote('/{dlFarm}/{dlPort}/{hash}{ext}/{title}{ext}')
+where downURL, dlFarm, dlPort are top-level response fields (not per-item).
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -70,6 +75,41 @@ def _build_search_query(query: SourceSearchRequest) -> str:
     elif query.season is not None:
         parts.append(f"S{query.season:02d}")
     return " ".join(parts)
+
+
+def build_easynews_download_url(
+    down_url: str, dl_farm: str, dl_port: str,
+    post_hash: str, ext: str, filename: str,
+) -> str:
+    """Build the upstream Easynews download URL from search response fields.
+
+    Pattern (from Umbrella source):
+      {downURL}/{dlFarm}/{dlPort}/{post_hash}{ext}/{filename}{ext}
+    """
+    ext_dot = f".{ext.lstrip('.')}" if ext else ""
+    safe_name = quote(filename, safe="")
+    return f"{down_url}/{dl_farm}/{dl_port}/{post_hash}{ext_dot}/{safe_name}{ext_dot}"
+
+
+def build_proxy_stream_url(
+    down_url: str, dl_farm: str, dl_port: str,
+    post_hash: str, ext: str, filename: str,
+) -> str:
+    """Build a server-relative proxy URL for an Easynews result.
+
+    The proxy endpoint on our server will fetch from Easynews with
+    the stored credentials, so clients never need auth details.
+    """
+    params: dict[str, str] = {
+        "post_hash": post_hash,
+        "filename": filename,
+        "down_url": down_url,
+        "dl_farm": dl_farm,
+        "dl_port": dl_port,
+    }
+    if ext:
+        params["ext"] = ext.lstrip(".")
+    return f"/source-providers/easynews/stream?{urlencode(params)}"
 
 
 class EasynewsProvider(SourceProvider):
@@ -144,7 +184,6 @@ class EasynewsProvider(SourceProvider):
 
     @staticmethod
     def _build_search_url(query: str) -> str:
-        from urllib.parse import quote
         fex = ",".join(VIDEO_EXTENSIONS)
         q = quote(query, safe="")
         return (
@@ -162,6 +201,17 @@ class EasynewsProvider(SourceProvider):
         if not isinstance(items, list):
             return results
 
+        down_url = data.get("downURL", "")
+        dl_farm = data.get("dlFarm", "")
+        dl_port = str(data.get("dlPort", ""))
+
+        if not down_url or not dl_farm or not dl_port:
+            logger.warning(
+                "Easynews response missing top-level URL fields: downURL=%r dlFarm=%r dlPort=%r",
+                down_url, dl_farm, dl_port,
+            )
+            return results
+
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -176,29 +226,34 @@ class EasynewsProvider(SourceProvider):
             if ext not in VIDEO_EXTENSIONS:
                 continue
 
+            post_hash = item.get("0", item.get("hash", ""))
+            if not post_hash:
+                continue
+
             full_filename = f"{filename}.{ext}" if not filename.lower().endswith(f".{ext}") else filename
 
             raw_size = item.get("rawSize", item.get("size", 0))
             size_bytes = int(raw_size) if raw_size else 0
 
-            runtime = item.get("runtime", None)
             duration_seconds = None
-            if isinstance(runtime, (int, float)) and runtime > 0:
-                duration_seconds = int(runtime)
-            else:
-                duration_str = item.get("14", "")
-                if duration_str:
-                    try:
-                        parts = str(duration_str).replace("h", ":").replace("m", ":").replace("s", "").split(":")
-                        parts = [p.strip() for p in parts if p.strip()]
-                        if len(parts) == 3:
-                            duration_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-                        elif len(parts) == 2:
-                            duration_seconds = int(parts[0]) * 60 + int(parts[1])
-                    except (ValueError, IndexError):
-                        pass
+            duration_str = item.get("14", "")
+            if duration_str:
+                try:
+                    parts = str(duration_str).replace("h", ":").replace("m", ":").replace("s", "").split(":")
+                    parts = [p.strip() for p in parts if p.strip()]
+                    if len(parts) == 3:
+                        duration_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                    elif len(parts) == 2:
+                        duration_seconds = int(parts[0]) * 60 + int(parts[1])
+                except (ValueError, IndexError):
+                    pass
+            if duration_str and (re.match(r"^\d+s", duration_str) or re.match(r"^[0-5]m", duration_str)):
+                continue
 
-            stream_url = build_proxy_stream_url(item, full_filename)
+            stream_url = build_proxy_stream_url(
+                down_url=down_url, dl_farm=dl_farm, dl_port=dl_port,
+                post_hash=post_hash, ext=ext, filename=filename,
+            )
 
             results.append(SourceResult(
                 provider_key="easynews",
@@ -211,54 +266,3 @@ class EasynewsProvider(SourceProvider):
             ))
 
         return results
-
-
-def build_easynews_download_url(item: dict, filename: str) -> str | None:
-    """Build the upstream Easynews download URL from search result fields.
-
-    Uses dl_farm, dl_port, post_hash, and sig as documented in Umbrella's
-    source code. Returns the raw Easynews URL (requires Basic Auth).
-    """
-    post_hash = item.get("0", item.get("hash", ""))
-    if not post_hash:
-        return None
-    from urllib.parse import quote
-    dl_farm = item.get("farm", item.get("dl_farm", ""))
-    dl_port = item.get("port", item.get("dl_port", ""))
-    sig = item.get("sig", "")
-    ext_field = item.get("11", item.get("extension", ""))
-    ext = f".{ext_field.lstrip('.')}" if ext_field else ""
-    safe_name = quote(filename, safe="")
-    if dl_farm and dl_port:
-        base = f"https://{dl_farm}/dl/{dl_port}/{post_hash}{ext}/{safe_name}"
-    else:
-        base = f"https://members.easynews.com/dl/{post_hash}/{safe_name}"
-    if sig:
-        base += f"?sig={sig}&ns=N"
-    return base
-
-
-def build_proxy_stream_url(item: dict, filename: str) -> str | None:
-    """Build a server-relative proxy URL for an Easynews result.
-
-    The proxy endpoint on our server will fetch from Easynews with
-    the stored credentials, so clients never need auth details.
-    """
-    post_hash = item.get("0", item.get("hash", ""))
-    if not post_hash:
-        return None
-    from urllib.parse import quote, urlencode
-    params: dict[str, str] = {"post_hash": post_hash, "filename": filename}
-    dl_farm = item.get("farm", item.get("dl_farm", ""))
-    dl_port = item.get("port", item.get("dl_port", ""))
-    sig = item.get("sig", "")
-    ext_field = item.get("11", item.get("extension", ""))
-    if dl_farm:
-        params["dl_farm"] = dl_farm
-    if dl_port:
-        params["dl_port"] = dl_port
-    if sig:
-        params["sig"] = sig
-    if ext_field:
-        params["ext"] = ext_field.lstrip(".")
-    return f"/source-providers/easynews/stream?{urlencode(params)}"
