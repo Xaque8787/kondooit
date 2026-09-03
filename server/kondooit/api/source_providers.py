@@ -195,8 +195,8 @@ class SourceProviderController(Controller):
     ) -> Stream:
         """Proxy an Easynews download through the server with stored credentials.
 
-        Resolves the Easynews URL (follows redirects to CDN) then streams
-        the content back. Supports HTTP Range requests for seeking.
+        Streams directly from Easynews with Basic Auth, following any
+        redirects. Supports HTTP Range requests so VLC/browsers can seek.
         """
         config = await source_provider_service.get_config(session, "easynews")
         if config is None or config.status != SourceProviderStatus.ENABLED:
@@ -214,11 +214,7 @@ class SourceProviderController(Controller):
             down_url=down_url, dl_farm=dl_farm, dl_port=dl_port,
             post_hash=post_hash, ext=ext, filename=filename,
         )
-
-        resolved_url = await self._resolve_easynews_url(upstream_url, username, password)
-        if not resolved_url:
-            from litestar.exceptions import ServiceUnavailableException
-            raise ServiceUnavailableException("Failed to resolve Easynews download URL")
+        logger.info("Easynews stream proxy: %s", upstream_url)
 
         upstream_headers: dict[str, str] = {}
         range_header = request.headers.get("range")
@@ -238,23 +234,25 @@ class SourceProviderController(Controller):
         client = httpx.AsyncClient(
             timeout=httpx.Timeout(10.0, read=300.0),
             follow_redirects=True,
+            auth=(username, password),
         )
 
         try:
             upstream_resp = await client.send(
-                client.build_request("GET", resolved_url, headers=upstream_headers),
+                client.build_request("GET", upstream_url, headers=upstream_headers),
                 stream=True,
             )
         except Exception as e:
             await client.aclose()
-            logger.error("Easynews CDN connection failed for %s: %s", post_hash, e)
+            logger.error("Easynews upstream connection failed for %s: %s", post_hash, e)
             from litestar.exceptions import ServiceUnavailableException
-            raise ServiceUnavailableException("Failed to connect to Easynews CDN")
+            raise ServiceUnavailableException("Failed to connect to Easynews")
 
         if upstream_resp.status_code not in (200, 206):
+            body = (await upstream_resp.aread())[:500]
             await upstream_resp.aclose()
             await client.aclose()
-            logger.warning("Easynews CDN returned %d for %s", upstream_resp.status_code, post_hash)
+            logger.warning("Easynews upstream returned %d for %s — body: %s", upstream_resp.status_code, post_hash, body)
             from litestar.exceptions import ServiceUnavailableException
             raise ServiceUnavailableException("Easynews returned an error")
 
@@ -285,34 +283,6 @@ class SourceProviderController(Controller):
             media_type=content_type,
             headers=response_headers,
         )
-
-    @staticmethod
-    async def _resolve_easynews_url(url: str, username: str, password: str) -> str | None:
-        """Resolve an Easynews download URL to its final CDN endpoint.
-
-        Easynews redirects the initial authenticated URL to a CDN. We follow
-        the redirect chain and return the final URL. This mirrors Umbrella's
-        unrestrict_link method.
-        """
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(60.0),
-                follow_redirects=True,
-                auth=(username, password),
-            ) as client:
-                resp = await client.send(
-                    client.build_request("GET", url),
-                    stream=True,
-                )
-                if not resp.is_success:
-                    await resp.aclose()
-                    return None
-                resolved = str(resp.url)
-                await resp.aclose()
-                return resolved
-        except Exception as e:
-            logger.error("Easynews URL resolution failed: %s", e)
-            return None
 
     @get("/{key:str}")
     async def get_config(
