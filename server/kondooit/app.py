@@ -20,6 +20,7 @@ from kondooit.api.discovery import DiscoveryController
 from kondooit.api.health import health
 from kondooit.api.providers import ProviderController
 from kondooit.api.source_providers import SourceProviderController
+from kondooit.api.streams import StreamController
 from kondooit.api.user_state import UserStateController
 from kondooit.application.auth_service import AuthService
 from kondooit.application.catalog_service import CatalogService
@@ -31,6 +32,7 @@ from kondooit.application.source_provider_service import (
     SourceProviderRegistry,
     SourceProviderService,
 )
+from kondooit.application.stream_store import StreamHandleStore
 from kondooit.application.user_state_service import UserContentStateService
 from kondooit.config import Settings, get_settings
 from kondooit.infrastructure.database import create_engine, create_session_factory
@@ -113,6 +115,8 @@ def create_app(settings: Settings | None = None) -> Litestar:
     # IMDB resolver (uses TMDB external IDs endpoint)
     imdb_resolver = ImdbResolver(tmdb_provider, config_repo)
 
+    stream_store = StreamHandleStore()
+
     source_provider_service = SourceProviderService(
         source_registry, source_config_repo,
         scraper_manager=scraper_manager,
@@ -185,8 +189,11 @@ def create_app(settings: Settings | None = None) -> Litestar:
     async def provide_scraper_module_repo() -> AsyncIterator[ScraperModuleRepository]:
         yield scraper_module_repo
 
+    async def provide_stream_store() -> AsyncIterator[StreamHandleStore]:
+        yield stream_store
+
     return Litestar(
-        route_handlers=[health, AuthController, ProviderController, SourceProviderController, CatalogController, DiscoveryController, UserStateController],
+        route_handlers=[health, AuthController, ProviderController, SourceProviderController, StreamController, CatalogController, DiscoveryController, UserStateController],
         lifespan=[lifespan],
         dependencies={
             "session": provide_session,
@@ -197,6 +204,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "user_state_service": provide_user_state_service,
             "source_provider_service": provide_source_provider_service,
             "scraper_module_repo": provide_scraper_module_repo,
+            "stream_store": provide_stream_store,
         },
         debug=settings.debug,
     )

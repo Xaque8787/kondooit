@@ -305,7 +305,7 @@ export interface SourceResult {
   seeders: number | null;
   source_type: string;
   scraper_source: string | null;
-  stream_url: string | null;
+  stream_id: string | null;
   is_season_pack: boolean;
   file_count: number;
 }

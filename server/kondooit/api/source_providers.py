@@ -8,16 +8,14 @@ search endpoint that runs scrapers + cache checks + direct search.
 from __future__ import annotations
 
 import logging
-from urllib.parse import quote
 
-import httpx
 from litestar import Controller, Request, get, put, post, delete
-from litestar.response import Stream
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kondooit.application.source_provider_ports import SourceProviderConfig, SourceProviderStatus, SourceSearchRequest
 from kondooit.application.source_provider_service import SourceProviderService, ScraperModuleManager
+from kondooit.application.stream_store import StreamHandleStore
 from kondooit.infrastructure.scraper_loader import load_module
 from kondooit.infrastructure.scraper_module_repo import ScraperModuleRepository
 
@@ -78,7 +76,7 @@ class ResolveRequest(BaseModel):
 class ResolveResponse(BaseModel):
     success: bool
     detail: str
-    stream_url: str | None = None
+    stream_id: str | None = None
 
 
 class AddTorrentRequest(BaseModel):
@@ -102,7 +100,7 @@ class SourceResultResponse(BaseModel):
     seeders: int | None = None
     source_type: str = "direct"
     scraper_source: str | None = None
-    stream_url: str | None = None
+    stream_id: str | None = None
     is_season_pack: bool = False
     file_count: int = 0
 
@@ -180,110 +178,6 @@ class SourceProviderController(Controller):
             for p in providers
         ]
 
-    @get("/easynews/stream")
-    async def easynews_stream(
-        self,
-        request: Request,
-        post_hash: str,
-        filename: str,
-        down_url: str,
-        dl_farm: str,
-        dl_port: str,
-        session: AsyncSession,
-        source_provider_service: SourceProviderService,
-        ext: str = "",
-    ) -> Stream:
-        """Proxy an Easynews download through the server with stored credentials.
-
-        Streams directly from Easynews with Basic Auth, following any
-        redirects. Supports HTTP Range requests so VLC/browsers can seek.
-        """
-        config = await source_provider_service.get_config(session, "easynews")
-        if config is None or config.status != SourceProviderStatus.ENABLED:
-            from litestar.exceptions import NotFoundException
-            raise NotFoundException("Easynews provider not configured")
-
-        username = config.credentials.get("username", "")
-        password = config.credentials.get("password", "")
-        if not username or not password:
-            from litestar.exceptions import NotFoundException
-            raise NotFoundException("Easynews credentials not configured")
-
-        from kondooit.infrastructure.providers.easynews import build_easynews_download_url
-        upstream_url = build_easynews_download_url(
-            down_url=down_url, dl_farm=dl_farm, dl_port=dl_port,
-            post_hash=post_hash, ext=ext, filename=filename,
-        )
-        logger.info("Easynews stream proxy: %s", upstream_url)
-
-        upstream_headers: dict[str, str] = {}
-        range_header = request.headers.get("range")
-        if range_header:
-            upstream_headers["Range"] = range_header
-
-        content_type = "video/mp4"
-        if ext in ("mkv",):
-            content_type = "video/x-matroska"
-        elif ext in ("avi",):
-            content_type = "video/x-msvideo"
-        elif ext in ("ts", "m2ts"):
-            content_type = "video/mp2t"
-        elif ext in ("webm",):
-            content_type = "video/webm"
-
-        client = httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0, read=300.0),
-            follow_redirects=True,
-            auth=(username, password),
-        )
-
-        try:
-            upstream_resp = await client.send(
-                client.build_request("GET", upstream_url, headers=upstream_headers),
-                stream=True,
-            )
-        except Exception as e:
-            await client.aclose()
-            logger.error("Easynews upstream connection failed for %s: %s", post_hash, e)
-            from litestar.exceptions import ServiceUnavailableException
-            raise ServiceUnavailableException("Failed to connect to Easynews")
-
-        if upstream_resp.status_code not in (200, 206):
-            body = (await upstream_resp.aread())[:500]
-            await upstream_resp.aclose()
-            await client.aclose()
-            logger.warning("Easynews upstream returned %d for %s — body: %s", upstream_resp.status_code, post_hash, body)
-            from litestar.exceptions import ServiceUnavailableException
-            raise ServiceUnavailableException("Easynews returned an error")
-
-        response_headers: dict[str, str] = {
-            "Content-Disposition": f'inline; filename="{filename}"',
-            "Accept-Ranges": "bytes",
-        }
-        content_length = upstream_resp.headers.get("content-length")
-        if content_length:
-            response_headers["Content-Length"] = content_length
-        content_range = upstream_resp.headers.get("content-range")
-        if content_range:
-            response_headers["Content-Range"] = content_range
-
-        status_code = upstream_resp.status_code
-
-        async def stream_generator():
-            try:
-                async for chunk in upstream_resp.aiter_bytes(chunk_size=131072):
-                    yield chunk
-            finally:
-                await upstream_resp.aclose()
-                await client.aclose()
-
-        return Stream(
-            stream_generator(),
-            status_code=status_code,
-            media_type=content_type,
-            headers=response_headers,
-        )
-
     @get("/{key:str}")
     async def get_config(
         self,
@@ -350,6 +244,7 @@ class SourceProviderController(Controller):
         data: SourceSearchRequestBody,
         session: AsyncSession,
         source_provider_service: SourceProviderService,
+        stream_store: StreamHandleStore,
     ) -> list[SourceResultResponse]:
         query = SourceSearchRequest(
             title=data.title,
@@ -360,8 +255,28 @@ class SourceProviderController(Controller):
             content_type=data.content_type,
         )
         results = await source_provider_service.search_sources(session, query)
-        return [
-            SourceResultResponse(
+
+        easynews_auth = await self._get_easynews_auth(session, source_provider_service)
+
+        responses: list[SourceResultResponse] = []
+        for r in results:
+            stream_id = None
+            if r._upstream_url and easynews_auth:
+                stream_id = stream_store.create(
+                    provider_key=r.provider_key,
+                    upstream_url=r._upstream_url,
+                    upstream_auth=easynews_auth,
+                    filename=r.filename,
+                    content_type=r._content_type or "video/mp4",
+                )
+            elif r.stream_url and r.stream_url.startswith("http"):
+                stream_id = stream_store.create(
+                    provider_key=r.provider_key,
+                    upstream_url=r.stream_url,
+                    filename=r.filename,
+                    content_type="video/mp4",
+                )
+            responses.append(SourceResultResponse(
                 provider_key=r.provider_key,
                 filename=r.filename,
                 size_bytes=r.size_bytes,
@@ -372,12 +287,25 @@ class SourceProviderController(Controller):
                 seeders=r.seeders,
                 source_type=r.source_type,
                 scraper_source=r.scraper_source,
-                stream_url=r.stream_url,
+                stream_id=stream_id,
                 is_season_pack=r.is_season_pack,
                 file_count=r.file_count,
-            )
-            for r in results
-        ]
+            ))
+        return responses
+
+    @staticmethod
+    async def _get_easynews_auth(
+        session: AsyncSession,
+        service: SourceProviderService,
+    ) -> tuple[str, str] | None:
+        config = await service.get_config(session, "easynews")
+        if config is None or config.status != SourceProviderStatus.ENABLED:
+            return None
+        username = config.credentials.get("username", "")
+        password = config.credentials.get("password", "")
+        if not username or not password:
+            return None
+        return (username, password)
 
     @post("/add-torrent")
     async def add_torrent(
@@ -395,15 +323,25 @@ class SourceProviderController(Controller):
         data: ResolveRequest,
         session: AsyncSession,
         source_provider_service: SourceProviderService,
+        stream_store: StreamHandleStore,
     ) -> ResolveResponse:
         result = await source_provider_service.resolve_stream(
             session, data.provider_key, data.info_hash, data.file_index,
             season=data.season, episode=data.episode,
         )
+        stream_id = None
+        raw_url = result.get("stream_url")
+        if result.get("success") and raw_url:
+            stream_id = stream_store.create(
+                provider_key=data.provider_key,
+                upstream_url=raw_url,
+                filename="",
+                content_type="video/mp4",
+            )
         return ResolveResponse(
             success=result.get("success", False),
             detail=result.get("detail", ""),
-            stream_url=result.get("stream_url"),
+            stream_id=stream_id,
         )
 
     @get("/scrapers")

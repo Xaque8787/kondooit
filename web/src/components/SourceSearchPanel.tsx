@@ -31,14 +31,14 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
   const [addingHash, setAddingHash] = useState<string | null>(null);
   const [addedHashes, setAddedHashes] = useState<Set<string>>(new Set());
   const [resolvingHash, setResolvingHash] = useState<string | null>(null);
-  const [streamUrls, setStreamUrls] = useState<Record<string, string>>({});
+  const [resolvedStreamIds, setResolvedStreamIds] = useState<Record<string, string>>({});
 
   const handleSearch = async () => {
     setSearching(true);
     setError("");
     setResults(null);
     setAddedHashes(new Set());
-    setStreamUrls({});
+    setResolvedStreamIds({});
     try {
       const res = await api.searchSources(title, year, season, episode, tmdbId, contentType);
       setResults(res);
@@ -70,8 +70,8 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
     setError("");
     try {
       const res = await api.resolveStream(infoHash, providerKey, undefined, season, episode);
-      if (res.success && res.stream_url) {
-        setStreamUrls(prev => ({ ...prev, [infoHash]: res.stream_url! }));
+      if (res.success && res.stream_id) {
+        setResolvedStreamIds(prev => ({ ...prev, [infoHash]: res.stream_id! }));
       } else {
         setError(res.detail || "Failed to get stream URL");
       }
@@ -132,7 +132,7 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
                     result={r}
                     onResolve={r.info_hash ? () => handleResolve(r.info_hash!, r.provider_key) : undefined}
                     resolving={r.info_hash === resolvingHash}
-                    streamUrl={r.stream_url || (r.info_hash ? streamUrls[r.info_hash] : undefined)}
+                    streamId={r.stream_id || (r.info_hash ? resolvedStreamIds[r.info_hash] : undefined) || undefined}
                   />
                 ))}
               </div>
@@ -169,36 +169,30 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
   );
 }
 
-function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, streamUrl }: {
+function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, streamId }: {
   result: SourceResult;
   onAdd?: () => void;
   adding?: boolean;
   added?: boolean;
   onResolve?: () => void;
   resolving?: boolean;
-  streamUrl?: string;
+  streamId?: string;
 }) {
   const [copied, setCopied] = useState(false);
 
-  const fullStreamUrl = streamUrl
-    ? streamUrl.startsWith("/")
-      ? `${window.location.origin}/api${streamUrl}`
-      : streamUrl.startsWith("http")
-        ? streamUrl
-        : `${window.location.origin}${streamUrl}`
+  const streamUrl = streamId
+    ? `${window.location.origin}/api/streams/${streamId}`
     : undefined;
 
   const handleCopy = () => {
-    if (fullStreamUrl) {
-      navigator.clipboard.writeText(fullStreamUrl);
+    if (streamUrl) {
+      navigator.clipboard.writeText(streamUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
   };
 
-  const hasPreResolvedUrl = !!r.stream_url;
-  const resolvedUrl = fullStreamUrl;
-  const needsResolve = !hasPreResolvedUrl && onResolve && !resolvedUrl;
+  const needsResolve = !streamId && onResolve;
 
   return (
     <div className="flex flex-col gap-2 p-3 rounded-lg bg-ink-900/50 border border-ink-800/50">
@@ -312,7 +306,7 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
         </div>
       </div>
 
-      {resolvedUrl && (
+      {streamUrl && (
         <div className="flex items-center gap-3 px-2 py-2 rounded bg-emerald-950/40 border border-emerald-800/30">
           <button
             onClick={handleCopy}
@@ -321,7 +315,7 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
             {copied ? "Copied!" : "Copy URL"}
           </button>
           <a
-            href={resolvedUrl}
+            href={streamUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="text-[11px] font-medium text-ink-400 hover:text-ink-200 transition-colors"

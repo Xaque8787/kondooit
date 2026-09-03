@@ -1,6 +1,6 @@
 # ADR-0013: Transport-agnostic stream handles replace client-constructed URLs
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-03
 - **Supersedes:** —
 - **Superseded by:** —

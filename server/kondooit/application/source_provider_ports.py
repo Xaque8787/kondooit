@@ -97,8 +97,13 @@ class SourceResult:
     source_type: str = "direct"  # "direct", "cached_torrent", "in_library", "uncached_torrent"
     scraper_source: str | None = None  # which scraper discovered this hash
     stream_url: str | None = None
+    stream_id: str | None = None
     is_season_pack: bool = False
     file_count: int = 0
+    # Internal: upstream details for handle creation (not serialized to API)
+    _upstream_url: str | None = None
+    _upstream_auth: tuple[str, str] | None = None
+    _content_type: str | None = None
 
 
 class SourceProvider(ABC):

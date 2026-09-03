@@ -211,7 +211,7 @@ export const api = {
     }),
 
   resolveStream: (info_hash: string, provider_key: string = "torbox", file_index?: number, season?: number, episode?: number) =>
-    request<{ success: boolean; detail: string; stream_url: string | null }>("/source-providers/resolve", {
+    request<{ success: boolean; detail: string; stream_id: string | null }>("/source-providers/resolve", {
       method: "POST",
       body: JSON.stringify({ info_hash, provider_key, file_index: file_index ?? null, season: season ?? null, episode: episode ?? null }),
     }),

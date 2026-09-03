@@ -55,4 +55,4 @@ Status transitions:
 - [ADR-0010: Provider capability declaration](ADR-0010-provider-capability-declaration.md)
 - [ADR-0011: Provider priority and fallback behavior](ADR-0011-provider-priority-and-fallback.md) (Proposed)
 - [ADR-0012: Source resolvers as installable modules](ADR-0012-resolution-providers-as-installable-modules.md)
-- [ADR-0013: Transport-agnostic stream handles replace client-constructed URLs](ADR-0013-transport-agnostic-stream-handles.md) (Proposed)
+- [ADR-0013: Transport-agnostic stream handles replace client-constructed URLs](ADR-0013-transport-agnostic-stream-handles.md)

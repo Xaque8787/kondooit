@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 import httpx
 
@@ -91,25 +91,15 @@ def build_easynews_download_url(
     return f"{down_url}/{dl_farm}/{dl_port}/{post_hash}{ext_dot}/{safe_name}{ext_dot}"
 
 
-def build_proxy_stream_url(
-    down_url: str, dl_farm: str, dl_port: str,
-    post_hash: str, ext: str, filename: str,
-) -> str:
-    """Build a server-relative proxy URL for an Easynews result.
-
-    The proxy endpoint on our server will fetch from Easynews with
-    the stored credentials, so clients never need auth details.
-    """
-    params: dict[str, str] = {
-        "post_hash": post_hash,
-        "filename": filename,
-        "down_url": down_url,
-        "dl_farm": dl_farm,
-        "dl_port": dl_port,
+def _content_type_for_ext(ext: str) -> str:
+    mapping = {
+        "mkv": "video/x-matroska",
+        "avi": "video/x-msvideo",
+        "ts": "video/mp2t",
+        "m2ts": "video/mp2t",
+        "webm": "video/webm",
     }
-    if ext:
-        params["ext"] = ext.lstrip(".")
-    return f"/source-providers/easynews/stream?{urlencode(params)}"
+    return mapping.get(ext, "video/mp4")
 
 
 class EasynewsProvider(SourceProvider):
@@ -250,7 +240,7 @@ class EasynewsProvider(SourceProvider):
             if duration_str and (re.match(r"^\d+s", duration_str) or re.match(r"^[0-5]m", duration_str)):
                 continue
 
-            stream_url = build_proxy_stream_url(
+            upstream_url = build_easynews_download_url(
                 down_url=down_url, dl_farm=dl_farm, dl_port=dl_port,
                 post_hash=post_hash, ext=ext, filename=filename,
             )
@@ -262,7 +252,8 @@ class EasynewsProvider(SourceProvider):
                 quality=_detect_quality(full_filename),
                 codec=_detect_codec(full_filename),
                 duration_seconds=duration_seconds,
-                stream_url=stream_url,
+                _upstream_url=upstream_url,
+                _content_type=_content_type_for_ext(ext),
             ))
 
         return results
