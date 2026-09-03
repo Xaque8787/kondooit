@@ -180,16 +180,24 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
 }) {
   const [copied, setCopied] = useState(false);
 
+  const fullStreamUrl = streamUrl
+    ? streamUrl.startsWith("/")
+      ? `${window.location.origin}/api${streamUrl}`
+      : streamUrl.startsWith("http")
+        ? streamUrl
+        : `${window.location.origin}${streamUrl}`
+    : undefined;
+
   const handleCopy = () => {
-    if (streamUrl) {
-      navigator.clipboard.writeText(streamUrl);
+    if (fullStreamUrl) {
+      navigator.clipboard.writeText(fullStreamUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
   };
 
   const hasPreResolvedUrl = !!r.stream_url;
-  const resolvedUrl = streamUrl?.startsWith("/") ? `/api${streamUrl}` : streamUrl;
+  const resolvedUrl = fullStreamUrl;
   const needsResolve = !hasPreResolvedUrl && onResolve && !resolvedUrl;
 
   return (
