@@ -3,12 +3,50 @@ import { useSearchParams, useNavigate } from "react-router-dom";
 import Hls from "hls.js";
 import { api } from "../api";
 
+/** Detect which codecs this browser can play in MPEG-TS/MP4 via MSE. */
+function detectCodecs(): { vc: string; ac: string } {
+  const video: string[] = [];
+  const audio: string[] = [];
+
+  const v = document.createElement("video");
+
+  if (v.canPlayType('video/mp4; codecs="avc1.640029"')) video.push("h264");
+  if (v.canPlayType('video/mp4; codecs="hvc1.1.6.L150.B0"') ||
+      v.canPlayType('video/mp4; codecs="hev1.1.6.L150.B0"')) video.push("hevc");
+  if (v.canPlayType('video/mp4; codecs="av01.0.15M.10"')) video.push("av1");
+  if (v.canPlayType('video/webm; codecs="vp9"')) video.push("vp9");
+
+  if (v.canPlayType('audio/mp4; codecs="mp4a.40.2"')) audio.push("aac");
+  if (v.canPlayType('audio/mp4; codecs="ac-3"')) audio.push("ac3");
+  if (v.canPlayType('audio/mp4; codecs="ec-3"')) audio.push("eac3");
+  if (v.canPlayType('audio/mp4; codecs="mp3"') || v.canPlayType("audio/mpeg")) audio.push("mp3");
+  if (v.canPlayType('audio/mp4; codecs="opus"') || v.canPlayType('audio/ogg; codecs="opus"')) audio.push("opus");
+  if (v.canPlayType("audio/flac")) audio.push("flac");
+
+  return {
+    vc: video.join(",") || "h264",
+    ac: audio.join(",") || "aac",
+  };
+}
+
+const clientCodecs = detectCodecs();
+
+interface StreamInfo {
+  duration_seconds: number;
+  video_codec: string;
+  audio_codec: string;
+  width: number;
+  height: number;
+  decision?: string;
+}
+
 export function PlayerPage() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const progressInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const realDurationRef = useRef<number>(0);
 
   const streamId = params.get("stream");
   const title = params.get("title") || "Untitled";
@@ -21,14 +59,16 @@ export function PlayerPage() {
 
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadingMessage, setLoadingMessage] = useState("Preparing stream...");
   const [showControls, setShowControls] = useState(true);
+  const [isSeeking, setIsSeeking] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const reportProgress = useCallback(() => {
     const video = videoRef.current;
     if (!video || !providerKey || !externalId) return;
     const pos = Math.floor(video.currentTime);
-    const dur = Math.floor(video.duration) || 0;
+    const dur = Math.floor(realDurationRef.current || video.duration) || 0;
     if (pos <= 0 || dur <= 0) return;
     api.beaconProgress({
       provider_key: providerKey,
@@ -42,19 +82,29 @@ export function PlayerPage() {
     });
   }, [providerKey, contentType, externalId, seriesExternalId, seasonNumber, episodeNumber]);
 
-  useEffect(() => {
-    if (!streamId) {
-      setError("No stream specified");
-      setLoading(false);
-      return;
-    }
+  const codecParams = `vc=${encodeURIComponent(clientCodecs.vc)}&ac=${encodeURIComponent(clientCodecs.ac)}`;
 
-    const video = videoRef.current;
-    if (!video) return;
+  /** Seek via server restart when the user jumps past transcoded content. */
+  const serverSeek = useCallback(async (targetTime: number) => {
+    if (!streamId) return;
+    setIsSeeking(true);
+    setLoadingMessage("Seeking...");
+    setLoading(true);
 
-    const hlsUrl = `/api/hls/${streamId}/master.m3u8`;
+    try {
+      const resp = await fetch(`/api/hls/${streamId}/seek?t=${targetTime}&${codecParams}`);
+      if (!resp.ok) throw new Error("Seek failed");
 
-    if (Hls.isSupported()) {
+      // Destroy and recreate hls.js to load new playlist
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+
+      const video = videoRef.current;
+      if (!video) return;
+
+      const hlsUrl = `/api/hls/${streamId}/master.m3u8?${codecParams}`;
       const hls = new Hls({
         maxBufferLength: 30,
         maxMaxBufferLength: 120,
@@ -73,46 +123,136 @@ export function PlayerPage() {
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         setLoading(false);
+        setIsSeeking(false);
         video.play().catch(() => {});
       });
 
-      let mediaErrorRecoveries = 0;
-      hls.on(Hls.Events.ERROR, (_event, data) => {
-        console.error("[HLS ERROR]", data.type, data.details, data.fatal, data.reason, data.response?.code, data);
-        if (data.fatal) {
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaErrorRecoveries < 3) {
-            mediaErrorRecoveries++;
-            console.warn(`[HLS] Recovering from media error (attempt ${mediaErrorRecoveries})`);
-            hls.recoverMediaError();
-          } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 503) {
-            setTimeout(() => hls.loadSource(hlsUrl), 2000);
-          } else {
-            const detail = data.reason || data.details || data.type;
-            setError(
-              data.type === Hls.ErrorTypes.NETWORK_ERROR
-                ? `Network error: ${detail}`
-                : `Playback failed: ${detail}`
-            );
-            setLoading(false);
-          }
-        }
-      });
-
-      return () => {
-        hls.destroy();
-        hlsRef.current = null;
-      };
-    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = hlsUrl;
-      video.addEventListener("loadedmetadata", () => {
-        setLoading(false);
-        video.play().catch(() => {});
-      });
-    } else {
-      setError("Your browser does not support HLS playback");
+      attachErrorHandler(hls, hlsUrl, video);
+    } catch {
+      setIsSeeking(false);
       setLoading(false);
     }
+  }, [streamId, codecParams]);
+
+  function attachErrorHandler(hls: Hls, hlsUrl: string, video: HTMLVideoElement) {
+    let mediaErrorRecoveries = 0;
+    hls.on(Hls.Events.ERROR, (_event, data) => {
+      console.error("[HLS ERROR]", data.type, data.details, data.fatal, data.reason, data.response?.code);
+      if (data.fatal) {
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaErrorRecoveries < 3) {
+          mediaErrorRecoveries++;
+          hls.recoverMediaError();
+        } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 503) {
+          setTimeout(() => hls.loadSource(hlsUrl), 2000);
+        } else {
+          const detail = data.reason || data.details || data.type;
+          setError(
+            data.type === Hls.ErrorTypes.NETWORK_ERROR
+              ? `Network error: ${detail}`
+              : `Playback failed: ${detail}`
+          );
+          setLoading(false);
+        }
+      }
+    });
+  }
+
+  useEffect(() => {
+    if (!streamId) {
+      setError("No stream specified");
+      setLoading(false);
+      return;
+    }
+
+    const video = videoRef.current;
+    if (!video) return;
+
+    let cancelled = false;
+
+    async function init() {
+      // Fetch stream info first for real duration + codec decision
+      try {
+        setLoadingMessage("Analyzing stream...");
+        const infoResp = await fetch(`/api/hls/${streamId}/info`);
+        if (infoResp.ok) {
+          const info: StreamInfo = await infoResp.json();
+          if (info.duration_seconds > 0) {
+            realDurationRef.current = info.duration_seconds;
+          }
+          if (info.decision) {
+            const isRemux = info.decision.startsWith("remux");
+            setLoadingMessage(isRemux ? "Starting stream..." : "Transcoding stream...");
+          }
+        }
+      } catch {
+        // Continue without probe info
+      }
+
+      if (cancelled) return;
+      setLoadingMessage("Buffering...");
+
+      const hlsUrl = `/api/hls/${streamId}/master.m3u8?${codecParams}`;
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          maxBufferLength: 30,
+          maxMaxBufferLength: 120,
+          startLevel: -1,
+          startPosition: 0,
+          liveSyncDuration: 0,
+          liveMaxLatencyDuration: Infinity,
+          manifestLoadingRetryDelay: 2000,
+          manifestLoadingMaxRetry: 30,
+          debug: false,
+        });
+        hlsRef.current = hls;
+
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(video);
+
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          setLoading(false);
+          video.play().catch(() => {});
+        });
+
+        attachErrorHandler(hls, hlsUrl, video);
+      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = hlsUrl;
+        video.addEventListener("loadedmetadata", () => {
+          setLoading(false);
+          video.play().catch(() => {});
+        });
+      } else {
+        setError("Your browser does not support HLS playback");
+        setLoading(false);
+      }
+    }
+
+    init();
+
+    return () => {
+      cancelled = true;
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+    };
   }, [streamId]);
+
+  // Override video.duration with real duration so the seek bar shows full movie
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const handleMeta = () => {
+      // If we have a real duration and the video's duration is much shorter
+      // (because only part is transcoded), we need a custom seek bar.
+      // The browser's native controls won't help here, but since we use
+      // custom controls via keyboard, this is handled there.
+    };
+    video.addEventListener("loadedmetadata", handleMeta);
+    return () => video.removeEventListener("loadedmetadata", handleMeta);
+  }, []);
 
   useEffect(() => {
     progressInterval.current = setInterval(reportProgress, 10000);
@@ -125,7 +265,7 @@ export function PlayerPage() {
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       const video = videoRef.current;
-      if (!video) return;
+      if (!video || isSeeking) return;
       switch (e.key) {
         case " ":
         case "k":
@@ -136,10 +276,21 @@ export function PlayerPage() {
           e.preventDefault();
           video.currentTime = Math.max(0, video.currentTime - 10);
           break;
-        case "ArrowRight":
+        case "ArrowRight": {
           e.preventDefault();
-          video.currentTime = Math.min(video.duration, video.currentTime + 10);
+          const target = video.currentTime + 10;
+          const bufferedEnd = video.buffered.length > 0
+            ? video.buffered.end(video.buffered.length - 1)
+            : video.duration;
+          if (target <= bufferedEnd + 5) {
+            // Within buffered range, seek normally
+            video.currentTime = Math.min(video.duration, target);
+          } else if (realDurationRef.current > 0 && target < realDurationRef.current) {
+            // Beyond buffered, need server-side seek
+            serverSeek(target);
+          }
           break;
+        }
         case "f":
           e.preventDefault();
           document.fullscreenElement ? document.exitFullscreen() : video.requestFullscreen();
@@ -155,7 +306,7 @@ export function PlayerPage() {
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [navigate]);
+  }, [navigate, isSeeking, serverSeek]);
 
   const handleMouseMove = () => {
     setShowControls(true);
@@ -194,7 +345,7 @@ export function PlayerPage() {
         <div className="absolute inset-0 flex items-center justify-center z-20">
           <div className="flex flex-col items-center gap-4">
             <div className="w-12 h-12 border-2 border-ink-700 border-t-brand-500 rounded-full animate-spin" />
-            <p className="text-ink-400 text-sm">Preparing stream...</p>
+            <p className="text-ink-400 text-sm">{loadingMessage}</p>
           </div>
         </div>
       )}

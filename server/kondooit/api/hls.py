@@ -1,20 +1,28 @@
-"""HLS remux endpoint — streaming event mode with MPEG-TS segments.
+"""HLS remux/transcode endpoint with smart codec selection.
 
-Serves growing-playlist HLS for browser playback. FFmpeg writes MPEG-TS
-segments (.ts) and an event playlist that grows as segments appear. The
-client starts playback as soon as the first few segments are ready.
+Probes upstream media with ffprobe to detect codecs and duration,
+then picks the lightest FFmpeg pipeline the client can play:
+  1. Remux (copy both video+audio) — fastest, near-zero CPU
+  2. Remux video + transcode audio — fast, minimal CPU
+  3. Full transcode — slow, for incompatible video codecs (HEVC on Chrome)
 
-This is the "proxy + remux" tier from ADR-0014.
+Exposes real duration via an info endpoint so the player can show
+accurate progress regardless of how much has been transcoded.
+
+Supports seeking past the transcoded frontier by killing FFmpeg
+and restarting with -ss at the requested position.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import shutil
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from litestar import Controller, get
@@ -28,26 +36,240 @@ logger = logging.getLogger(__name__)
 HLS_SEGMENT_DIR = Path(tempfile.gettempdir()) / "kondooit_hls"
 SEGMENT_DURATION = 6
 STALE_SESSION_SECONDS = 3600
-MIN_SEGMENTS_BEFORE_SERVE = 3
+MIN_SEGMENTS_BEFORE_SERVE = 2
+
+# Codecs browsers can natively decode in MPEG-TS via hls.js / MSE
+BROWSER_VIDEO_CODECS = {"h264", "avc", "avc1"}
+BROWSER_AUDIO_CODECS = {"aac", "mp3", "mp4a", "opus"}
+
+
+@dataclass
+class ProbeResult:
+    video_codec: str = ""
+    audio_codec: str = ""
+    duration_seconds: float = 0.0
+    width: int = 0
+    height: int = 0
+    video_bit_depth: int = 8
+
+
+async def ffprobe_url(url: str, headers: dict[str, str] | None = None) -> ProbeResult | None:
+    """Run ffprobe on a URL to detect codecs and duration."""
+    header_str = ""
+    if headers:
+        for k, v in headers.items():
+            header_str += f"{k}: {v}\r\n"
+
+    cmd = [
+        "ffprobe",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-print_format", "json",
+        "-show_format",
+        "-show_streams",
+        "-select_streams", "v:0",
+    ]
+    if header_str:
+        cmd.extend(["-headers", header_str])
+    cmd.append(url)
+
+    # Also probe audio in a second pass (ffprobe -select_streams limits output)
+    cmd_audio = [
+        "ffprobe",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-print_format", "json",
+        "-show_streams",
+        "-select_streams", "a:0",
+    ]
+    if header_str:
+        cmd_audio.extend(["-headers", header_str])
+    cmd_audio.append(url)
+
+    try:
+        proc_v, proc_a = await asyncio.gather(
+            asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            ),
+            asyncio.create_subprocess_exec(
+                *cmd_audio, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            ),
+        )
+
+        (stdout_v, stderr_v), (stdout_a, _stderr_a) = await asyncio.gather(
+            asyncio.wait_for(proc_v.communicate(), timeout=30),
+            asyncio.wait_for(proc_a.communicate(), timeout=30),
+        )
+    except (asyncio.TimeoutError, FileNotFoundError) as e:
+        logger.error("ffprobe failed: %s", e)
+        return None
+
+    result = ProbeResult()
+
+    try:
+        data_v = json.loads(stdout_v)
+        if data_v.get("streams"):
+            vs = data_v["streams"][0]
+            result.video_codec = (vs.get("codec_name") or "").lower()
+            result.width = int(vs.get("width") or 0)
+            result.height = int(vs.get("height") or 0)
+            bits = vs.get("bits_per_raw_sample") or vs.get("bits_per_component")
+            if bits:
+                result.video_bit_depth = int(bits)
+
+        fmt = data_v.get("format", {})
+        dur = fmt.get("duration")
+        if dur:
+            result.duration_seconds = float(dur)
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        logger.warning("ffprobe video parse error: %s", e)
+
+    try:
+        data_a = json.loads(stdout_a)
+        if data_a.get("streams"):
+            result.audio_codec = (data_a["streams"][0].get("codec_name") or "").lower()
+    except (json.JSONDecodeError, KeyError, ValueError):
+        pass
+
+    # If duration not in format, try video stream duration
+    if result.duration_seconds <= 0:
+        try:
+            data_v = json.loads(stdout_v)
+            for s in data_v.get("streams", []):
+                d = s.get("duration")
+                if d and float(d) > 0:
+                    result.duration_seconds = float(d)
+                    break
+        except Exception:
+            pass
+
+    logger.info(
+        "Probe result: video=%s audio=%s duration=%.1fs %dx%d %dbit",
+        result.video_codec, result.audio_codec, result.duration_seconds,
+        result.width, result.height, result.video_bit_depth,
+    )
+    return result
+
+
+def decide_codecs(
+    probe: ProbeResult,
+    client_video_codecs: set[str] | None = None,
+    client_audio_codecs: set[str] | None = None,
+) -> tuple[list[str], list[str], str]:
+    """Decide FFmpeg video and audio codec flags.
+
+    Returns (video_flags, audio_flags, decision_reason).
+    video_flags: e.g. ["-c:v", "copy"] or ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22"]
+    audio_flags: e.g. ["-c:a", "copy"] or ["-c:a", "aac", "-b:a", "192k"]
+    """
+    supported_video = client_video_codecs or BROWSER_VIDEO_CODECS
+    supported_audio = client_audio_codecs or BROWSER_AUDIO_CODECS
+
+    # Normalize codec names
+    vc = probe.video_codec.lower()
+    ac = probe.audio_codec.lower()
+
+    # Map common names
+    vc_normalized = vc
+    if vc in ("h264", "avc", "avc1"):
+        vc_normalized = "h264"
+    elif vc in ("hevc", "h265", "hev1", "hvc1"):
+        vc_normalized = "hevc"
+    elif vc in ("av1", "av01"):
+        vc_normalized = "av1"
+
+    ac_normalized = ac
+    if ac in ("aac", "mp4a"):
+        ac_normalized = "aac"
+    elif ac in ("eac3", "ec-3", "ec3"):
+        ac_normalized = "eac3"
+    elif ac in ("ac3", "ac-3"):
+        ac_normalized = "ac3"
+    elif ac in ("truehd", "mlp"):
+        ac_normalized = "truehd"
+    elif ac in ("dts", "dca"):
+        ac_normalized = "dts"
+    elif ac in ("flac",):
+        ac_normalized = "flac"
+    elif ac in ("opus",):
+        ac_normalized = "opus"
+
+    # Video decision
+    can_copy_video = vc_normalized in supported_video
+    # 10-bit H.264 High 10 often fails in browsers
+    if vc_normalized == "h264" and probe.video_bit_depth > 8:
+        can_copy_video = False
+
+    # Audio decision
+    can_copy_audio = ac_normalized in supported_audio
+
+    if can_copy_video and can_copy_audio:
+        reason = f"remux (copy {vc}+{ac})"
+        return ["-c:v", "copy"], ["-c:a", "copy"], reason
+    elif can_copy_video:
+        reason = f"remux video (copy {vc}), transcode audio ({ac}->aac)"
+        return ["-c:v", "copy"], ["-c:a", "aac", "-b:a", "192k"], reason
+    elif can_copy_audio:
+        reason = f"transcode video ({vc}->h264), copy audio ({ac})"
+        return (
+            ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22"],
+            ["-c:a", "copy"],
+            reason,
+        )
+    else:
+        reason = f"full transcode ({vc}->h264, {ac}->aac)"
+        return (
+            ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22"],
+            ["-c:a", "aac", "-b:a", "192k"],
+            reason,
+        )
+
+
+def _build_input_url(handle: StreamHandle) -> str:
+    if handle.upstream_auth:
+        user, pw = handle.upstream_auth
+        url = handle.upstream_url
+        scheme_end = url.find("://")
+        if scheme_end >= 0:
+            return url[:scheme_end + 3] + f"{user}:{pw}@" + url[scheme_end + 3:]
+    return handle.upstream_url
 
 
 class HlsSession:
-    """Tracks a running FFmpeg remux process for one stream."""
+    """Tracks a running FFmpeg process for one stream."""
 
-    def __init__(self, stream_id: str, handle: StreamHandle, output_dir: Path) -> None:
+    def __init__(
+        self,
+        stream_id: str,
+        handle: StreamHandle,
+        output_dir: Path,
+        probe: ProbeResult | None = None,
+        client_video_codecs: set[str] | None = None,
+        client_audio_codecs: set[str] | None = None,
+    ) -> None:
         self.stream_id = stream_id
         self.handle = handle
         self.output_dir = output_dir
+        self.probe = probe
+        self.client_video_codecs = client_video_codecs
+        self.client_audio_codecs = client_audio_codecs
         self.process: asyncio.subprocess.Process | None = None
         self.started_at = time.monotonic()
         self.last_access = time.monotonic()
+        self.start_offset: float = 0.0
         self._started = False
         self._failed = False
         self._finished = False
         self._error_message = ""
+        self._decision_reason = ""
         self._stderr_task: asyncio.Task | None = None
 
-    async def start(self) -> None:
+    @property
+    def duration_seconds(self) -> float:
+        return self.probe.duration_seconds if self.probe else 0.0
+
+    async def start(self, seek_seconds: float = 0.0) -> None:
+        self.start_offset = seek_seconds
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         playlist_path = self.output_dir / "stream.m3u8"
@@ -57,24 +279,21 @@ class HlsSession:
         for k, v in self.handle.upstream_headers.items():
             input_headers += f"{k}: {v}\r\n"
 
-        if self.handle.upstream_auth:
-            user, pw = self.handle.upstream_auth
-            auth_url = self.handle.upstream_url
-            scheme_end = auth_url.find("://")
-            if scheme_end >= 0:
-                auth_url = auth_url[:scheme_end + 3] + f"{user}:{pw}@" + auth_url[scheme_end + 3:]
-                cmd_input = auth_url
-            else:
-                cmd_input = self.handle.upstream_url
-        else:
-            cmd_input = self.handle.upstream_url
+        cmd_input = _build_input_url(self.handle)
 
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel", "warning",
-            "-y",
-        ]
+        # Decide codecs
+        if self.probe:
+            video_flags, audio_flags, reason = decide_codecs(
+                self.probe, self.client_video_codecs, self.client_audio_codecs,
+            )
+        else:
+            video_flags = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22"]
+            audio_flags = ["-c:a", "aac", "-b:a", "192k"]
+            reason = "full transcode (no probe data)"
+
+        self._decision_reason = reason
+
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y"]
 
         if input_headers:
             cmd.extend(["-headers", input_headers])
@@ -83,25 +302,37 @@ class HlsSession:
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
-            "-i", cmd_input,
-            "-map", "0:v:0",
-            "-map", "0:a:0",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "22",
-            "-c:a", "aac",
-            "-b:a", "192k",
+        ])
+
+        if seek_seconds > 0:
+            cmd.extend(["-ss", f"{seek_seconds:.3f}"])
+
+        cmd.extend(["-i", cmd_input, "-map", "0:v:0", "-map", "0:a:0"])
+        cmd.extend(video_flags)
+        cmd.extend(audio_flags)
+
+        # Force keyframes at segment boundaries when transcoding video
+        if video_flags[1] != "copy":
+            cmd.extend(["-force_key_frames", f"expr:gte(t,n_forced*{SEGMENT_DURATION})"])
+
+        start_number = int(seek_seconds / SEGMENT_DURATION) if seek_seconds > 0 else 0
+
+        cmd.extend([
             "-f", "hls",
             "-hls_time", str(SEGMENT_DURATION),
             "-hls_list_size", "0",
             "-hls_playlist_type", "event",
             "-hls_flags", "independent_segments+append_list",
             "-hls_segment_type", "mpegts",
+            "-start_number", str(start_number),
             "-hls_segment_filename", str(segment_pattern),
             str(playlist_path),
         ])
 
-        logger.info("Starting HLS remux for stream %s", self.stream_id)
+        logger.info(
+            "Starting HLS for stream %s: %s (seek=%.1fs)",
+            self.stream_id, reason, seek_seconds,
+        )
         logger.info("Upstream URL (first 80 chars): %s", cmd_input[:80])
 
         try:
@@ -162,6 +393,11 @@ class HlsSession:
             return 0
         return len(list(self.output_dir.glob("seg_*.ts")))
 
+    def max_seekable_seconds(self) -> float:
+        """Approximate furthest point we have segments for."""
+        count = self.segment_count()
+        return self.start_offset + (count * SEGMENT_DURATION)
+
     async def stop(self) -> None:
         if self.process and self.process.returncode is None:
             self.process.terminate()
@@ -171,6 +407,8 @@ class HlsSession:
                 self.process.kill()
         if self._stderr_task and not self._stderr_task.done():
             self._stderr_task.cancel()
+
+    def cleanup_files(self) -> None:
         if self.output_dir.exists():
             shutil.rmtree(self.output_dir, ignore_errors=True)
 
@@ -179,12 +417,19 @@ class HlsSession:
 
 
 class HlsSessionManager:
-    """Manages active HLS remux sessions."""
+    """Manages active HLS sessions."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, HlsSession] = {}
+        self._probes: dict[str, ProbeResult] = {}
 
-    async def get_or_create(self, stream_id: str, handle: StreamHandle) -> HlsSession:
+    async def get_or_create(
+        self,
+        stream_id: str,
+        handle: StreamHandle,
+        client_video_codecs: set[str] | None = None,
+        client_audio_codecs: set[str] | None = None,
+    ) -> HlsSession:
         if stream_id in self._sessions:
             session = self._sessions[stream_id]
             if session.failed:
@@ -195,10 +440,52 @@ class HlsSessionManager:
 
         await self._sweep()
 
+        # Probe once per stream and cache
+        probe = self._probes.get(stream_id)
+        if probe is None:
+            input_url = _build_input_url(handle)
+            probe = await ffprobe_url(input_url, handle.upstream_headers or None)
+            if probe:
+                self._probes[stream_id] = probe
+
         session_hash = hashlib.sha256(stream_id.encode()).hexdigest()[:12]
         output_dir = HLS_SEGMENT_DIR / session_hash
-        session = HlsSession(stream_id, handle, output_dir)
+        session = HlsSession(
+            stream_id, handle, output_dir,
+            probe=probe,
+            client_video_codecs=client_video_codecs,
+            client_audio_codecs=client_audio_codecs,
+        )
         await session.start()
+        self._sessions[stream_id] = session
+        return session
+
+    async def seek(
+        self,
+        stream_id: str,
+        handle: StreamHandle,
+        seek_seconds: float,
+        client_video_codecs: set[str] | None = None,
+        client_audio_codecs: set[str] | None = None,
+    ) -> HlsSession:
+        """Kill current FFmpeg and restart at the requested position."""
+        old = self._sessions.pop(stream_id, None)
+        probe = self._probes.get(stream_id)
+        if old:
+            await old.stop()
+            old.cleanup_files()
+            if not probe:
+                probe = old.probe
+
+        session_hash = hashlib.sha256(stream_id.encode()).hexdigest()[:12]
+        output_dir = HLS_SEGMENT_DIR / session_hash
+        session = HlsSession(
+            stream_id, handle, output_dir,
+            probe=probe,
+            client_video_codecs=client_video_codecs,
+            client_audio_codecs=client_audio_codecs,
+        )
+        await session.start(seek_seconds=seek_seconds)
         self._sessions[stream_id] = session
         return session
 
@@ -208,10 +495,15 @@ class HlsSessionManager:
             session.touch()
         return session
 
+    def get_probe(self, stream_id: str) -> ProbeResult | None:
+        return self._probes.get(stream_id)
+
     async def remove(self, stream_id: str) -> None:
         session = self._sessions.pop(stream_id, None)
+        self._probes.pop(stream_id, None)
         if session:
             await session.stop()
+            session.cleanup_files()
 
     async def _sweep(self) -> None:
         now = time.monotonic()
@@ -223,8 +515,60 @@ class HlsSessionManager:
             await self.remove(sid)
 
 
+def _parse_codec_set(raw: str | None) -> set[str] | None:
+    if not raw:
+        return None
+    codecs = {c.strip().lower() for c in raw.split(",") if c.strip()}
+    return codecs if codecs else None
+
+
 class HlsController(Controller):
     path = "/hls"
+
+    @get("/{stream_id:str}/info")
+    async def get_info(
+        self,
+        stream_id: str,
+        stream_store: StreamHandleStore,
+        hls_manager: HlsSessionManager,
+    ) -> Response:
+        """Return probe info and session status.
+
+        The player calls this before requesting the playlist to get
+        the real duration and codec decision.
+        """
+        handle = stream_store.get(stream_id)
+        if handle is None:
+            raise NotFoundException("Stream not found or expired")
+
+        # Probe if not already cached
+        probe = hls_manager.get_probe(stream_id)
+        if probe is None:
+            input_url = _build_input_url(handle)
+            probe = await ffprobe_url(input_url, handle.upstream_headers or None)
+            if probe:
+                hls_manager._probes[stream_id] = probe
+
+        session = hls_manager.get(stream_id)
+
+        info: dict = {
+            "stream_id": stream_id,
+            "duration_seconds": probe.duration_seconds if probe else 0,
+            "video_codec": probe.video_codec if probe else "",
+            "audio_codec": probe.audio_codec if probe else "",
+            "width": probe.width if probe else 0,
+            "height": probe.height if probe else 0,
+        }
+        if session:
+            info["decision"] = session._decision_reason
+            info["transcoded_seconds"] = session.max_seekable_seconds()
+            info["is_running"] = session.is_running
+            info["failed"] = session.failed
+        return Response(
+            content=info,
+            status_code=200,
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
 
     @get("/{stream_id:str}/master.m3u8")
     async def get_playlist(
@@ -232,28 +576,42 @@ class HlsController(Controller):
         stream_id: str,
         stream_store: StreamHandleStore,
         hls_manager: HlsSessionManager,
+        vc: str | None = None,
+        ac: str | None = None,
     ) -> Response:
+        """Serve the HLS playlist.
+
+        Query params:
+          vc - comma-separated video codecs the client supports (e.g. "h264,av1")
+          ac - comma-separated audio codecs the client supports (e.g. "aac,mp3,opus")
+        """
         handle = stream_store.get(stream_id)
         if handle is None:
             raise NotFoundException("Stream not found or expired")
 
-        session = await hls_manager.get_or_create(stream_id, handle)
+        client_vc = _parse_codec_set(vc)
+        client_ac = _parse_codec_set(ac)
+
+        session = await hls_manager.get_or_create(
+            stream_id, handle,
+            client_video_codecs=client_vc,
+            client_audio_codecs=client_ac,
+        )
 
         if session.failed:
             return Response(
-                content=f"HLS remux failed: {session._error_message}",
+                content=f"HLS failed: {session._error_message}",
                 status_code=500,
                 media_type="text/plain",
             )
 
         playlist_path = session.output_dir / "stream.m3u8"
 
-        # Wait for enough segments before first serve
         retries = 0
         while retries < 150:
             if session.failed:
                 return Response(
-                    content=f"HLS remux failed: {session._error_message}",
+                    content=f"HLS failed: {session._error_message}",
                     status_code=500,
                     media_type="text/plain",
                 )
@@ -274,8 +632,6 @@ class HlsController(Controller):
 
         content = playlist_path.read_text()
 
-        # For event playlists, hls.js needs to know it can start from beginning
-        # If FFmpeg finished, the playlist has #EXT-X-ENDLIST already
         return Response(
             content=content,
             media_type="application/vnd.apple.mpegurl",
@@ -283,6 +639,51 @@ class HlsController(Controller):
                 "Cache-Control": "no-cache, no-store",
                 "Access-Control-Allow-Origin": "*",
             },
+        )
+
+    @get("/{stream_id:str}/seek")
+    async def seek_stream(
+        self,
+        stream_id: str,
+        stream_store: StreamHandleStore,
+        hls_manager: HlsSessionManager,
+        t: float = 0.0,
+        vc: str | None = None,
+        ac: str | None = None,
+    ) -> Response:
+        """Seek to a position. Kills FFmpeg and restarts at the new offset.
+
+        Query params:
+          t  - target time in seconds
+          vc - client video codecs
+          ac - client audio codecs
+        """
+        handle = stream_store.get(stream_id)
+        if handle is None:
+            raise NotFoundException("Stream not found or expired")
+
+        client_vc = _parse_codec_set(vc)
+        client_ac = _parse_codec_set(ac)
+
+        session = await hls_manager.seek(
+            stream_id, handle, seek_seconds=t,
+            client_video_codecs=client_vc,
+            client_audio_codecs=client_ac,
+        )
+
+        if session.failed:
+            return Response(
+                content={"error": session._error_message},
+                status_code=500,
+            )
+
+        return Response(
+            content={
+                "seeked_to": t,
+                "start_offset": session.start_offset,
+            },
+            status_code=200,
+            headers={"Access-Control-Allow-Origin": "*"},
         )
 
     @get("/{stream_id:str}/{filename:str}")
@@ -302,9 +703,8 @@ class HlsController(Controller):
 
         segment_path = session.output_dir / safe_name
 
-        # Brief wait for segment to appear (FFmpeg may still be writing)
         retries = 0
-        while not segment_path.exists() and retries < 15:
+        while not segment_path.exists() and retries < 25:
             await asyncio.sleep(0.2)
             retries += 1
 
