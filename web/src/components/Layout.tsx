@@ -2,12 +2,17 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth";
 
 export function Layout() {
-  const { user, logout } = useAuth();
+  const { activeProfile, logout, clearProfile } = useAuth();
   const navigate = useNavigate();
 
   const handleLogout = () => {
     logout();
     navigate("/login");
+  };
+
+  const handleSwitchProfile = () => {
+    clearProfile();
+    navigate("/profiles");
   };
 
   const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -40,16 +45,28 @@ export function Layout() {
                 </NavLink>
               </nav>
             </div>
-            <div className="flex items-center gap-4">
-              {user && (
-                <div className="flex items-center gap-3">
-                  <span className="text-sm text-ink-400 hidden sm:inline">
-                    {user.username}
-                  </span>
+            <div className="flex items-center gap-3">
+              {activeProfile && (
+                <>
+                  <button
+                    onClick={handleSwitchProfile}
+                    className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-ink-800/50 transition-colors"
+                    title="Switch profile"
+                  >
+                    <div
+                      className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold text-white"
+                      style={{ backgroundColor: activeProfile.avatar_color }}
+                    >
+                      {activeProfile.display_name.charAt(0).toUpperCase()}
+                    </div>
+                    <span className="text-sm text-ink-300 hidden sm:inline">
+                      {activeProfile.display_name}
+                    </span>
+                  </button>
                   <button onClick={handleLogout} className="btn-ghost text-sm">
                     Sign out
                   </button>
-                </div>
+                </>
               )}
             </div>
           </div>
@@ -60,7 +77,7 @@ export function Layout() {
       </main>
       <footer className="border-t border-ink-800 py-6">
         <div className="max-w-7xl mx-auto px-4 text-center text-sm text-ink-500">
-          Kondooit v0.0.1
+          Kondooit v0.0.2
         </div>
       </footer>
     </div>

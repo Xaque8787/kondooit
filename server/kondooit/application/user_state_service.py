@@ -31,6 +31,7 @@ class UserContentState:
     external_id: int
     is_favorite: bool = False
     is_following: bool = False
+    profile_id: UUID | None = None
 
 
 class UserContentStateService:
@@ -40,10 +41,14 @@ class UserContentStateService:
         self._repo = state_repo
 
     async def toggle_favorite(
-        self, session, user_id: UUID, ref: ContentReference
+        self, session, user_id: UUID, ref: ContentReference,
+        profile_id: UUID | None = None,
     ) -> UserContentState:
         """Toggle the favorite state for a content reference."""
-        state = await self._repo.get(session, user_id, ref.provider_key, ref.content_type, ref.external_id)
+        state = await self._repo.get(
+            session, user_id, ref.provider_key, ref.content_type, ref.external_id,
+            profile_id=profile_id,
+        )
         if state is None:
             state = UserContentState(
                 id=None, user_id=user_id,
@@ -51,6 +56,7 @@ class UserContentStateService:
                 content_type=ref.content_type,
                 external_id=ref.external_id,
                 is_favorite=True, is_following=False,
+                profile_id=profile_id,
             )
         else:
             state = UserContentState(
@@ -60,16 +66,21 @@ class UserContentStateService:
                 external_id=state.external_id,
                 is_favorite=not state.is_favorite,
                 is_following=state.is_following,
+                profile_id=state.profile_id,
             )
         saved = await self._repo.save(session, state)
         await session.commit()
         return saved
 
     async def toggle_following(
-        self, session, user_id: UUID, ref: ContentReference
+        self, session, user_id: UUID, ref: ContentReference,
+        profile_id: UUID | None = None,
     ) -> UserContentState:
         """Toggle the following state for a content reference."""
-        state = await self._repo.get(session, user_id, ref.provider_key, ref.content_type, ref.external_id)
+        state = await self._repo.get(
+            session, user_id, ref.provider_key, ref.content_type, ref.external_id,
+            profile_id=profile_id,
+        )
         if state is None:
             state = UserContentState(
                 id=None, user_id=user_id,
@@ -77,6 +88,7 @@ class UserContentStateService:
                 content_type=ref.content_type,
                 external_id=ref.external_id,
                 is_favorite=False, is_following=True,
+                profile_id=profile_id,
             )
         else:
             state = UserContentState(
@@ -86,25 +98,32 @@ class UserContentStateService:
                 external_id=state.external_id,
                 is_favorite=state.is_favorite,
                 is_following=not state.is_following,
+                profile_id=state.profile_id,
             )
         saved = await self._repo.save(session, state)
         await session.commit()
         return saved
 
     async def get_state(
-        self, session, user_id: UUID, ref: ContentReference
+        self, session, user_id: UUID, ref: ContentReference,
+        profile_id: UUID | None = None,
     ) -> UserContentState | None:
         """Get the current state for a content reference."""
-        return await self._repo.get(session, user_id, ref.provider_key, ref.content_type, ref.external_id)
+        return await self._repo.get(
+            session, user_id, ref.provider_key, ref.content_type, ref.external_id,
+            profile_id=profile_id,
+        )
 
     async def list_favorites(
-        self, session, user_id: UUID, content_type: str | None = None
+        self, session, user_id: UUID, content_type: str | None = None,
+        profile_id: UUID | None = None,
     ) -> list[UserContentState]:
         """List user's favorites, optionally filtered by content type."""
-        return await self._repo.list_favorites(session, user_id, content_type)
+        return await self._repo.list_favorites(session, user_id, content_type, profile_id=profile_id)
 
     async def list_following(
-        self, session, user_id: UUID, content_type: str | None = None
+        self, session, user_id: UUID, content_type: str | None = None,
+        profile_id: UUID | None = None,
     ) -> list[UserContentState]:
         """List user's followed content, optionally filtered by content type."""
-        return await self._repo.list_following(session, user_id, content_type)
+        return await self._repo.list_following(session, user_id, content_type, profile_id=profile_id)

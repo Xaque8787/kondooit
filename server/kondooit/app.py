@@ -18,11 +18,13 @@ from kondooit.api.auth import AuthController
 from kondooit.api.catalog import CatalogController
 from kondooit.api.discovery import DiscoveryController
 from kondooit.api.health import health
+from kondooit.api.profiles import ProfileController
 from kondooit.api.providers import ProviderController
 from kondooit.api.source_providers import SourceProviderController
 from kondooit.api.streams import StreamController
 from kondooit.api.user_state import UserStateController
 from kondooit.application.auth_service import AuthService
+from kondooit.application.profile_service import ProfileService
 from kondooit.application.catalog_service import CatalogService
 from kondooit.application.discovery_service import DiscoveryService
 from kondooit.application.metadata_service import MetadataService, ProviderRegistry
@@ -53,6 +55,7 @@ from kondooit.infrastructure.repositories import (
 from kondooit.infrastructure.scraper_loader import load_module
 from kondooit.infrastructure.scraper_module_repo import ScraperModuleRepository
 from kondooit.infrastructure.source_provider_repo import SqlAlchemySourceProviderConfigRepository
+from kondooit.infrastructure.profile_repo import SqlAlchemyProfileRepository
 from kondooit.infrastructure.user_state_repo import SqlAlchemyUserContentStateRepository
 from kondooit.infrastructure.security import BcryptPasswordHasher, JwtTokenService
 
@@ -123,6 +126,10 @@ def create_app(settings: Settings | None = None) -> Litestar:
         imdb_resolver=imdb_resolver,
     )
 
+    # Profile service (household profiles)
+    profile_repo = SqlAlchemyProfileRepository()
+    profile_service = ProfileService(profile_repo)
+
     # User content state service (favorites/following per ADR-0011)
     user_state_repo = SqlAlchemyUserContentStateRepository()
     user_state_service = UserContentStateService(user_state_repo)
@@ -192,8 +199,11 @@ def create_app(settings: Settings | None = None) -> Litestar:
     async def provide_stream_store() -> AsyncIterator[StreamHandleStore]:
         yield stream_store
 
+    async def provide_profile_service() -> AsyncIterator[ProfileService]:
+        yield profile_service
+
     return Litestar(
-        route_handlers=[health, AuthController, ProviderController, SourceProviderController, StreamController, CatalogController, DiscoveryController, UserStateController],
+        route_handlers=[health, AuthController, ProfileController, ProviderController, SourceProviderController, StreamController, CatalogController, DiscoveryController, UserStateController],
         lifespan=[lifespan],
         dependencies={
             "session": provide_session,
@@ -205,6 +215,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "source_provider_service": provide_source_provider_service,
             "scraper_module_repo": provide_scraper_module_repo,
             "stream_store": provide_stream_store,
+            "profile_service": provide_profile_service,
         },
         debug=settings.debug,
     )

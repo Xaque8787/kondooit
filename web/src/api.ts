@@ -30,6 +30,17 @@ function getToken(): string | null {
   return localStorage.getItem("kondooit_token");
 }
 
+function getProfileId(): string | null {
+  try {
+    const stored = localStorage.getItem("kondooit_profile");
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      return parsed?.id ?? null;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {
@@ -40,6 +51,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
+  }
+  const profileId = getProfileId();
+  if (profileId) {
+    headers["X-Profile-Id"] = profileId;
   }
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (!res.ok) {
@@ -234,4 +249,33 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled, config: config ?? null }),
     }),
+
+  // Profiles
+  listProfiles: () =>
+    request<import("./types").Profile[]>("/profiles/"),
+
+  createProfile: (data: {
+    display_name: string;
+    avatar_color?: string;
+    preferred_quality?: string;
+    allow_server_processing?: boolean;
+  }) =>
+    request<import("./types").Profile>("/profiles/", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateProfile: (profileId: string, data: {
+    display_name?: string;
+    avatar_color?: string;
+    preferred_quality?: string;
+    allow_server_processing?: boolean;
+  }) =>
+    request<import("./types").Profile>(`/profiles/${profileId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  deleteProfile: (profileId: string) =>
+    request<void>(`/profiles/${profileId}`, { method: "DELETE" }),
 };

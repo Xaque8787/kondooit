@@ -240,12 +240,30 @@ export interface ProviderCapabilities {
   capabilities: string[];
 }
 
+export interface ProfileBrief {
+  id: string;
+  display_name: string;
+  avatar_color: string;
+  is_admin: boolean;
+}
+
 export interface User {
   id: string;
   username: string;
   email: string;
   role: string;
   is_active: boolean;
+  profiles: ProfileBrief[];
+}
+
+export interface Profile {
+  id: string;
+  user_id: string;
+  display_name: string;
+  avatar_color: string;
+  is_admin: boolean;
+  preferred_quality: string;
+  allow_server_processing: boolean;
 }
 
 export interface LoginResponse {

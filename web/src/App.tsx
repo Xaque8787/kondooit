@@ -10,6 +10,7 @@ import { AuthProvider, useAuth } from "./auth";
 import { Layout } from "./components/Layout";
 import { LoginPage } from "./pages/LoginPage";
 import { SetupPage } from "./pages/SetupPage";
+import { ProfileSelectPage } from "./pages/ProfileSelectPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { MoviesPage } from "./pages/MoviesPage";
 import { MovieDetailPage } from "./pages/MovieDetailPage";
@@ -20,7 +21,7 @@ import { EpisodeDetailPage } from "./pages/EpisodeDetailPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
 
 function ProtectedRoute({ children }: { children: ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, activeProfile, loading } = useAuth();
   const location = useLocation();
 
   if (loading) {
@@ -35,11 +36,15 @@ function ProtectedRoute({ children }: { children: ReactNode }) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
+  if (!activeProfile) {
+    return <Navigate to="/profiles" replace />;
+  }
+
   return <>{children}</>;
 }
 
 function PublicRoute({ children }: { children: ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, activeProfile, loading } = useAuth();
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -47,9 +52,34 @@ function PublicRoute({ children }: { children: ReactNode }) {
       </div>
     );
   }
-  if (user) {
+  if (user && activeProfile) {
     return <Navigate to="/" replace />;
   }
+  if (user && !activeProfile) {
+    return <Navigate to="/profiles" replace />;
+  }
+  return <>{children}</>;
+}
+
+function ProfileRoute({ children }: { children: ReactNode }) {
+  const { user, activeProfile, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-ink-700 border-t-brand-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (activeProfile) {
+    return <Navigate to="/" replace />;
+  }
+
   return <>{children}</>;
 }
 
@@ -70,6 +100,14 @@ function AppRoutes() {
           <PublicRoute>
             <SetupPage />
           </PublicRoute>
+        }
+      />
+      <Route
+        path="/profiles"
+        element={
+          <ProfileRoute>
+            <ProfileSelectPage />
+          </ProfileRoute>
         }
       />
       <Route

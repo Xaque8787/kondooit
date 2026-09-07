@@ -1,12 +1,16 @@
 """User content state API endpoints.
 
 Per ADR-0011, these endpoints manage user preference/state (favorites/following).
-This is NOT a content catalog — it stores thin references to provider-sourced content.
+This is NOT a content catalog -- it stores thin references to provider-sourced content.
+
+When a profile_id header is sent, state is scoped to that profile.
 """
 
 from __future__ import annotations
 
-from litestar import Controller, get, post
+from uuid import UUID
+
+from litestar import Controller, get, post, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +32,16 @@ class UserStateResponse(BaseModel):
     is_following: bool
 
 
+def _get_profile_id(request: Request) -> UUID | None:
+    raw = request.headers.get("X-Profile-Id")
+    if raw:
+        try:
+            return UUID(raw)
+        except ValueError:
+            pass
+    return None
+
+
 class UserStateController(Controller):
     path = "/user-state"
     tags = ["User State"]
@@ -40,6 +54,7 @@ class UserStateController(Controller):
     )
     async def toggle_favorite(
         self,
+        request: Request,
         data: ContentRefRequest,
         session: AsyncSession,
         user_state_service: UserContentStateService,
@@ -50,7 +65,10 @@ class UserStateController(Controller):
             content_type=data.content_type,
             external_id=data.external_id,
         )
-        state = await user_state_service.toggle_favorite(session, current_user["id"], ref)
+        profile_id = _get_profile_id(request)
+        state = await user_state_service.toggle_favorite(
+            session, current_user["id"], ref, profile_id=profile_id,
+        )
         return UserStateResponse(
             provider_key=state.provider_key,
             content_type=state.content_type,
@@ -66,6 +84,7 @@ class UserStateController(Controller):
     )
     async def toggle_following(
         self,
+        request: Request,
         data: ContentRefRequest,
         session: AsyncSession,
         user_state_service: UserContentStateService,
@@ -76,7 +95,10 @@ class UserStateController(Controller):
             content_type=data.content_type,
             external_id=data.external_id,
         )
-        state = await user_state_service.toggle_following(session, current_user["id"], ref)
+        profile_id = _get_profile_id(request)
+        state = await user_state_service.toggle_following(
+            session, current_user["id"], ref, profile_id=profile_id,
+        )
         return UserStateResponse(
             provider_key=state.provider_key,
             content_type=state.content_type,
@@ -87,11 +109,12 @@ class UserStateController(Controller):
 
     @get(
         "/state/{provider_key:str}/{content_type:str}/{external_id:int}",
-        summary="Get content state for current user",
+        summary="Get content state for current user/profile",
         dependencies={"current_user": get_current_user},
     )
     async def get_state(
         self,
+        request: Request,
         provider_key: str,
         content_type: str,
         external_id: int,
@@ -104,7 +127,10 @@ class UserStateController(Controller):
             content_type=content_type,
             external_id=external_id,
         )
-        state = await user_state_service.get_state(session, current_user["id"], ref)
+        profile_id = _get_profile_id(request)
+        state = await user_state_service.get_state(
+            session, current_user["id"], ref, profile_id=profile_id,
+        )
         if state is None:
             return UserStateResponse(
                 provider_key=provider_key,
@@ -128,12 +154,16 @@ class UserStateController(Controller):
     )
     async def list_favorites(
         self,
+        request: Request,
         session: AsyncSession,
         user_state_service: UserContentStateService,
         current_user: dict,
         content_type: str | None = None,
     ) -> list[UserStateResponse]:
-        states = await user_state_service.list_favorites(session, current_user["id"], content_type)
+        profile_id = _get_profile_id(request)
+        states = await user_state_service.list_favorites(
+            session, current_user["id"], content_type, profile_id=profile_id,
+        )
         return [
             UserStateResponse(
                 provider_key=s.provider_key,
@@ -152,12 +182,16 @@ class UserStateController(Controller):
     )
     async def list_following(
         self,
+        request: Request,
         session: AsyncSession,
         user_state_service: UserContentStateService,
         current_user: dict,
         content_type: str | None = None,
     ) -> list[UserStateResponse]:
-        states = await user_state_service.list_following(session, current_user["id"], content_type)
+        profile_id = _get_profile_id(request)
+        states = await user_state_service.list_following(
+            session, current_user["id"], content_type, profile_id=profile_id,
+        )
         return [
             UserStateResponse(
                 provider_key=s.provider_key,

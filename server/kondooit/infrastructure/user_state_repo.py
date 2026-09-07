@@ -23,6 +23,7 @@ class UserContentStateModel(Base):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
     user_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    profile_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
     provider_key: Mapped[str] = mapped_column(String, nullable=False)
     content_type: Mapped[str] = mapped_column(String, nullable=False)
     external_id: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -36,6 +37,7 @@ def _model_to_domain(m: UserContentStateModel) -> UserContentState:
     return UserContentState(
         id=m.id,
         user_id=m.user_id,
+        profile_id=m.profile_id,
         provider_key=m.provider_key,
         content_type=m.content_type,
         external_id=m.external_id,
@@ -49,7 +51,8 @@ class SqlAlchemyUserContentStateRepository(UserContentStateRepository):
 
     async def get(
         self, session: AsyncSession, user_id: UUID,
-        provider_key: str, content_type: str, external_id: int
+        provider_key: str, content_type: str, external_id: int,
+        profile_id: UUID | None = None,
     ) -> UserContentState | None:
         stmt = select(UserContentStateModel).where(
             UserContentStateModel.user_id == user_id,
@@ -57,6 +60,8 @@ class SqlAlchemyUserContentStateRepository(UserContentStateRepository):
             UserContentStateModel.content_type == content_type,
             UserContentStateModel.external_id == external_id,
         )
+        if profile_id is not None:
+            stmt = stmt.where(UserContentStateModel.profile_id == profile_id)
         result = await session.execute(stmt)
         model = result.scalar_one_or_none()
         return _model_to_domain(model) if model else None
@@ -72,6 +77,7 @@ class SqlAlchemyUserContentStateRepository(UserContentStateRepository):
 
         model = UserContentStateModel(
             user_id=state.user_id,
+            profile_id=state.profile_id,
             provider_key=state.provider_key,
             content_type=state.content_type,
             external_id=state.external_id,
@@ -83,12 +89,15 @@ class SqlAlchemyUserContentStateRepository(UserContentStateRepository):
         return _model_to_domain(model)
 
     async def list_favorites(
-        self, session: AsyncSession, user_id: UUID, content_type: str | None = None
+        self, session: AsyncSession, user_id: UUID, content_type: str | None = None,
+        profile_id: UUID | None = None,
     ) -> list[UserContentState]:
         stmt = select(UserContentStateModel).where(
             UserContentStateModel.user_id == user_id,
             UserContentStateModel.is_favorite == True,
         )
+        if profile_id is not None:
+            stmt = stmt.where(UserContentStateModel.profile_id == profile_id)
         if content_type:
             stmt = stmt.where(UserContentStateModel.content_type == content_type)
         stmt = stmt.order_by(UserContentStateModel.updated_at.desc())
@@ -96,12 +105,15 @@ class SqlAlchemyUserContentStateRepository(UserContentStateRepository):
         return [_model_to_domain(m) for m in result.scalars().all()]
 
     async def list_following(
-        self, session: AsyncSession, user_id: UUID, content_type: str | None = None
+        self, session: AsyncSession, user_id: UUID, content_type: str | None = None,
+        profile_id: UUID | None = None,
     ) -> list[UserContentState]:
         stmt = select(UserContentStateModel).where(
             UserContentStateModel.user_id == user_id,
             UserContentStateModel.is_following == True,
         )
+        if profile_id is not None:
+            stmt = stmt.where(UserContentStateModel.profile_id == profile_id)
         if content_type:
             stmt = stmt.where(UserContentStateModel.content_type == content_type)
         stmt = stmt.order_by(UserContentStateModel.updated_at.desc())
