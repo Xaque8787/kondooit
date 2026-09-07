@@ -7,8 +7,8 @@ Revises: 0006_watch_progress
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0007_profile_playback_preferences"
-down_revision = "0006_watch_progress"
+revision = "0007"
+down_revision = "0006"
 branch_labels = None
 depends_on = None
 

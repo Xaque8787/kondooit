@@ -1,11 +1,11 @@
 #!/bin/sh
-set -e
 
 echo "Running database migrations..."
-alembic upgrade head || {
-    echo "Initial alembic upgrade failed — stamping current head and retrying..."
-    alembic stamp head
-}
+if alembic upgrade head; then
+    echo "Migrations applied successfully."
+else
+    echo "Alembic migration failed — server will rely on create_all fallback."
+fi
 
 echo "Starting Kondooit server..."
 exec uvicorn kondooit.app:app --host 0.0.0.0 --port 8000
