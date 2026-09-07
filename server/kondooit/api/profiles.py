@@ -128,6 +128,7 @@ class ProfileController(Controller):
         "/{profile_id:str}",
         summary="Delete a profile (non-admin only)",
         dependencies={"current_user": get_current_user},
+        status_code=200,
     )
     async def delete_profile(
         self,
