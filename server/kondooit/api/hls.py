@@ -74,7 +74,7 @@ class HlsSession:
         cmd = [
             "ffmpeg",
             "-hide_banner",
-            "-loglevel", "info",
+            "-loglevel", "warning",
             "-y",
         ]
 
@@ -88,7 +88,9 @@ class HlsSession:
             "-i", cmd_input,
             "-map", "0:v:0",
             "-map", "0:a:0",
-            "-c", "copy",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
             "-f", "hls",
             "-hls_time", str(SEGMENT_DURATION),
             "-hls_list_size", "0",
@@ -194,8 +196,12 @@ class HlsSessionManager:
     async def get_or_create(self, stream_id: str, handle: StreamHandle) -> HlsSession:
         if stream_id in self._sessions:
             session = self._sessions[stream_id]
-            session.touch()
-            return session
+            await session.check_health()
+            if session.failed:
+                await self.remove(stream_id)
+            else:
+                session.touch()
+                return session
 
         await self._sweep()
 
