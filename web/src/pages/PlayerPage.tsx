@@ -59,6 +59,11 @@ export function PlayerPage() {
         maxBufferLength: 30,
         maxMaxBufferLength: 120,
         startLevel: -1,
+        startPosition: 0,
+        liveSyncDuration: 0,
+        liveMaxLatencyDuration: Infinity,
+        manifestLoadingRetryDelay: 2000,
+        manifestLoadingMaxRetry: 30,
         debug: false,
       });
       hlsRef.current = hls;
@@ -71,10 +76,14 @@ export function PlayerPage() {
         video.play().catch(() => {});
       });
 
+      let mediaErrorRecoveries = 0;
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaErrorRecoveries < 3) {
+            mediaErrorRecoveries++;
             hls.recoverMediaError();
+          } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 503) {
+            setTimeout(() => hls.loadSource(hlsUrl), 2000);
           } else {
             setError(
               data.type === Hls.ErrorTypes.NETWORK_ERROR

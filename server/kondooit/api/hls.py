@@ -1,11 +1,8 @@
-"""HLS remux endpoint — VOD mode.
+"""HLS remux endpoint — streaming event mode with MPEG-TS segments.
 
-Serves VOD-style HLS for browser playback. When a client requests
-playback of a stream handle, this endpoint:
-
-1. Starts FFmpeg to remux the upstream source into HLS fMP4 segments
-2. Waits for FFmpeg to complete (remux is ~80-100x realtime with -c:v copy)
-3. Serves the finished M3U8 playlist and segments to hls.js
+Serves growing-playlist HLS for browser playback. FFmpeg writes MPEG-TS
+segments (.ts) and an event playlist that grows as segments appear. The
+client starts playback as soon as the first few segments are ready.
 
 This is the "proxy + remux" tier from ADR-0014.
 """
@@ -31,6 +28,7 @@ logger = logging.getLogger(__name__)
 HLS_SEGMENT_DIR = Path(tempfile.gettempdir()) / "kondooit_hls"
 SEGMENT_DURATION = 6
 STALE_SESSION_SECONDS = 3600
+MIN_SEGMENTS_BEFORE_SERVE = 3
 
 
 class HlsSession:
@@ -48,14 +46,12 @@ class HlsSession:
         self._finished = False
         self._error_message = ""
         self._stderr_task: asyncio.Task | None = None
-        self._done_event = asyncio.Event()
 
     async def start(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         playlist_path = self.output_dir / "stream.m3u8"
-        segment_pattern = self.output_dir / "seg_%05d.m4s"
-        init_segment = self.output_dir / "init.mp4"
+        segment_pattern = self.output_dir / "seg_%05d.ts"
 
         input_headers = ""
         for k, v in self.handle.upstream_headers.items():
@@ -93,19 +89,17 @@ class HlsSession:
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "192k",
-            "-movflags", "+faststart",
             "-f", "hls",
             "-hls_time", str(SEGMENT_DURATION),
             "-hls_list_size", "0",
-            "-hls_playlist_type", "vod",
-            "-hls_flags", "independent_segments",
-            "-hls_segment_type", "fmp4",
-            "-hls_fmp4_init_filename", init_segment.name,
+            "-hls_playlist_type", "event",
+            "-hls_flags", "independent_segments+append_list",
+            "-hls_segment_type", "mpegts",
             "-hls_segment_filename", str(segment_pattern),
             str(playlist_path),
         ])
 
-        logger.info("Starting HLS VOD remux for stream %s", self.stream_id)
+        logger.info("Starting HLS remux for stream %s", self.stream_id)
         logger.info("Upstream URL (first 80 chars): %s", cmd_input[:80])
 
         try:
@@ -119,12 +113,10 @@ class HlsSession:
         except FileNotFoundError:
             self._failed = True
             self._error_message = "FFmpeg not found on the server"
-            self._done_event.set()
             logger.error("FFmpeg binary not found")
         except Exception as e:
             self._failed = True
             self._error_message = str(e)
-            self._done_event.set()
             logger.error("Failed to start FFmpeg: %s", e)
 
     async def _read_stderr(self) -> None:
@@ -153,12 +145,6 @@ class HlsSession:
             elapsed = time.monotonic() - self.started_at
             logger.info("FFmpeg finished for %s in %.1fs", self.stream_id, elapsed)
 
-        self._done_event.set()
-
-    @property
-    def is_ready(self) -> bool:
-        return self._finished and not self._failed
-
     @property
     def is_running(self) -> bool:
         if not self._started or self.process is None:
@@ -169,15 +155,10 @@ class HlsSession:
     def failed(self) -> bool:
         return self._failed
 
-    async def wait_until_done(self, timeout: float = 600) -> bool:
-        """Wait for FFmpeg to finish. Returns True if successful."""
-        try:
-            await asyncio.wait_for(self._done_event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            self._failed = True
-            self._error_message = "FFmpeg remux timed out"
-            return False
-        return not self._failed
+    def segment_count(self) -> int:
+        if not self.output_dir.exists():
+            return 0
+        return len(list(self.output_dir.glob("seg_*.ts")))
 
     async def stop(self) -> None:
         if self.process and self.process.returncode is None:
@@ -263,29 +244,41 @@ class HlsController(Controller):
                 media_type="text/plain",
             )
 
-        if not session.is_ready:
-            ok = await session.wait_until_done(timeout=600)
-            if not ok:
+        playlist_path = session.output_dir / "stream.m3u8"
+
+        # Wait for enough segments before first serve
+        retries = 0
+        while retries < 150:
+            if session.failed:
                 return Response(
                     content=f"HLS remux failed: {session._error_message}",
                     status_code=500,
                     media_type="text/plain",
                 )
+            if playlist_path.exists() and session.segment_count() >= MIN_SEGMENTS_BEFORE_SERVE:
+                break
+            if session._finished and playlist_path.exists():
+                break
+            await asyncio.sleep(0.2)
+            retries += 1
 
-        playlist_path = session.output_dir / "stream.m3u8"
         if not playlist_path.exists():
             return Response(
-                content="Playlist file missing after remux completed",
-                status_code=500,
+                content="Playlist not ready yet",
+                status_code=503,
                 media_type="text/plain",
+                headers={"Retry-After": "2"},
             )
 
         content = playlist_path.read_text()
+
+        # For event playlists, hls.js needs to know it can start from beginning
+        # If FFmpeg finished, the playlist has #EXT-X-ENDLIST already
         return Response(
             content=content,
             media_type="application/vnd.apple.mpegurl",
             headers={
-                "Cache-Control": "max-age=3600",
+                "Cache-Control": "no-cache, no-store",
                 "Access-Control-Allow-Origin": "*",
             },
         )
@@ -307,17 +300,23 @@ class HlsController(Controller):
 
         segment_path = session.output_dir / safe_name
 
+        # Brief wait for segment to appear (FFmpeg may still be writing)
+        retries = 0
+        while not segment_path.exists() and retries < 15:
+            await asyncio.sleep(0.2)
+            retries += 1
+
         if not segment_path.exists():
             raise NotFoundException(f"Segment {safe_name} not found")
 
         content = segment_path.read_bytes()
 
-        if safe_name.endswith(".m4s"):
+        if safe_name.endswith(".ts"):
+            media_type = "video/mp2t"
+        elif safe_name.endswith(".m4s"):
             media_type = "video/iso.segment"
         elif safe_name.endswith(".mp4"):
             media_type = "video/mp4"
-        elif safe_name.endswith(".ts"):
-            media_type = "video/mp2t"
         else:
             media_type = "application/octet-stream"
 
