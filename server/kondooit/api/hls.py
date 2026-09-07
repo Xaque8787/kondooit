@@ -86,6 +86,8 @@ class HlsSession:
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
             "-i", cmd_input,
+            "-map", "0:v:0",
+            "-map", "0:a:0",
             "-c", "copy",
             "-f", "hls",
             "-hls_time", str(SEGMENT_DURATION),
