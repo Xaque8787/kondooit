@@ -78,17 +78,20 @@ export function PlayerPage() {
 
       let mediaErrorRecoveries = 0;
       hls.on(Hls.Events.ERROR, (_event, data) => {
+        console.error("[HLS ERROR]", data.type, data.details, data.fatal, data.reason, data.response?.code, data);
         if (data.fatal) {
           if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaErrorRecoveries < 3) {
             mediaErrorRecoveries++;
+            console.warn(`[HLS] Recovering from media error (attempt ${mediaErrorRecoveries})`);
             hls.recoverMediaError();
           } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 503) {
             setTimeout(() => hls.loadSource(hlsUrl), 2000);
           } else {
+            const detail = data.reason || data.details || data.type;
             setError(
               data.type === Hls.ErrorTypes.NETWORK_ERROR
-                ? "Network error — could not load stream"
-                : "Playback failed"
+                ? `Network error: ${detail}`
+                : `Playback failed: ${detail}`
             );
             setLoading(false);
           }
