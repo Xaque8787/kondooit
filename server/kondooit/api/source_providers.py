@@ -363,6 +363,8 @@ class SourceProviderController(Controller):
         instant_types = {"direct", "cached_torrent", "in_library"}
         candidates = [r for r in results if r.source_type in instant_types]
 
+        candidates = [r for r in candidates if r.playback_compatibility != "incompatible"]
+
         def _is_invalid_url(url: str | None) -> bool:
             if not url:
                 return True
@@ -374,8 +376,12 @@ class SourceProviderController(Controller):
             if not (r.source_type == "direct" and _is_invalid_url(r.stream_url or r._upstream_url))
         ]
 
+        compat_order = {"direct_play": 0, "remux": 1, "transcode": 2, "unknown": 3}
         type_priority = {"in_library": 0, "cached_torrent": 1, "direct": 2}
-        candidates.sort(key=lambda r: type_priority.get(r.source_type, 9))
+        candidates.sort(key=lambda r: (
+            compat_order.get(r.playback_compatibility, 3),
+            type_priority.get(r.source_type, 9),
+        ))
 
         if not candidates:
             return AutoPlayResponse(success=False, detail="No playable sources found")
@@ -703,11 +709,11 @@ def _apply_profile_preferences(results: list[SourceResult], profile: Profile) ->
         filtered = annotated
 
     compat_order = {"direct_play": 0, "remux": 1, "transcode": 2, "unknown": 3, "incompatible": 4, "exceeds_resolution": 5}
-    source_type_order = {"direct": 0, "in_library": 1, "cached_torrent": 2, "uncached_torrent": 3}
+    source_type_order = {"direct": 0, "in_library": 1, "cached_torrent": 2, "scraper_direct": 3, "uncached_torrent": 4}
     quality_order = {"2160p": 0, "1080p": 1, "720p": 2, "480p": 3, "": 4}
 
     filtered.sort(key=lambda r: (
-        source_type_order.get(r.source_type, 3),
+        source_type_order.get(r.source_type, 4),
         compat_order.get(r.playback_compatibility, 3),
         quality_order.get(r.quality, 4),
         -(r.seeders or 0),
