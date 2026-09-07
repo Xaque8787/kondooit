@@ -173,7 +173,10 @@ export function EpisodeDetailPage() {
             season={ep.season_number}
             episode={ep.episode_number}
             tmdbId={seriesIdNum}
-            contentType="series"
+            contentType="episode"
+            providerKey={provider}
+            externalId={ep.external_id}
+            seriesExternalId={seriesIdNum}
           />
         </div>
       </div>

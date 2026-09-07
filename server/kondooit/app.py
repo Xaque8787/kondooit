@@ -22,6 +22,7 @@ from kondooit.api.profiles import ProfileController
 from kondooit.api.providers import ProviderController
 from kondooit.api.source_providers import SourceProviderController
 from kondooit.api.streams import StreamController
+from kondooit.api.hls import HlsController, HlsSessionManager
 from kondooit.api.user_state import UserStateController
 from kondooit.api.watch_progress import WatchProgressController
 from kondooit.application.auth_service import AuthService
@@ -122,6 +123,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
     imdb_resolver = ImdbResolver(tmdb_provider, config_repo)
 
     stream_store = StreamHandleStore()
+    hls_manager = HlsSessionManager()
 
     source_provider_service = SourceProviderService(
         source_registry, source_config_repo,
@@ -212,8 +214,11 @@ def create_app(settings: Settings | None = None) -> Litestar:
     async def provide_watch_progress_service() -> AsyncIterator[WatchProgressService]:
         yield watch_progress_service
 
+    async def provide_hls_manager() -> AsyncIterator[HlsSessionManager]:
+        yield hls_manager
+
     return Litestar(
-        route_handlers=[health, AuthController, ProfileController, ProviderController, SourceProviderController, StreamController, CatalogController, DiscoveryController, UserStateController, WatchProgressController],
+        route_handlers=[health, AuthController, ProfileController, ProviderController, SourceProviderController, StreamController, HlsController, CatalogController, DiscoveryController, UserStateController, WatchProgressController],
         lifespan=[lifespan],
         dependencies={
             "session": provide_session,
@@ -227,6 +232,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "stream_store": provide_stream_store,
             "profile_service": provide_profile_service,
             "watch_progress_service": provide_watch_progress_service,
+            "hls_manager": provide_hls_manager,
         },
         debug=settings.debug,
     )

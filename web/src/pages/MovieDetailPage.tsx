@@ -214,6 +214,8 @@ export function MovieDetailPage() {
               year={movie.release_date ? parseInt(movie.release_date.substring(0, 4), 10) : undefined}
               tmdbId={movie.external_id}
               contentType="movie"
+              providerKey={provider}
+              externalId={movie.external_id}
             />
           </div>
         </div>

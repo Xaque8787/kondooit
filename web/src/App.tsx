@@ -19,6 +19,7 @@ import { SeriesDetailPage } from "./pages/SeriesDetailPage";
 import { DiscoverySectionPage } from "./pages/DiscoverySectionPage";
 import { EpisodeDetailPage } from "./pages/EpisodeDetailPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
+import { PlayerPage } from "./pages/PlayerPage";
 
 function ProtectedRoute({ children }: { children: ReactNode }) {
   const { user, activeProfile, loading } = useAuth();
@@ -125,6 +126,7 @@ function AppRoutes() {
         <Route path="/series/:provider/:id" element={<SeriesDetailPage />} />
         <Route path="/series/:provider/:seriesId/season/:season/episode/:episode" element={<EpisodeDetailPage />} />
         <Route path="/providers" element={<ProvidersPage />} />
+        <Route path="/player" element={<PlayerPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

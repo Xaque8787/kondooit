@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import type { SourceResult } from "../types";
 
@@ -22,9 +23,13 @@ interface SourceSearchPanelProps {
   episode?: number;
   tmdbId?: number;
   contentType?: string;
+  providerKey?: string;
+  externalId?: number;
+  seriesExternalId?: number;
 }
 
-export function SourceSearchPanel({ title, year, season, episode, tmdbId, contentType }: SourceSearchPanelProps) {
+export function SourceSearchPanel({ title, year, season, episode, tmdbId, contentType, providerKey, externalId, seriesExternalId }: SourceSearchPanelProps) {
+  const navigate = useNavigate();
   const [results, setResults] = useState<SourceResult[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState("");
@@ -133,6 +138,19 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
                     onResolve={r.info_hash ? () => handleResolve(r.info_hash!, r.provider_key) : undefined}
                     resolving={r.info_hash === resolvingHash}
                     streamId={r.stream_id || (r.info_hash ? resolvedStreamIds[r.info_hash] : undefined) || undefined}
+                    onPlay={(sid) => {
+                      const p = new URLSearchParams({
+                        stream: sid,
+                        title,
+                        type: contentType || "movie",
+                      });
+                      if (providerKey) p.set("provider", providerKey);
+                      if (externalId) p.set("eid", String(externalId));
+                      if (seriesExternalId) p.set("series_eid", String(seriesExternalId));
+                      if (season) p.set("season", String(season));
+                      if (episode) p.set("episode", String(episode));
+                      navigate(`/player?${p.toString()}`);
+                    }}
                   />
                 ))}
               </div>
@@ -169,7 +187,7 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
   );
 }
 
-function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, streamId }: {
+function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, streamId, onPlay }: {
   result: SourceResult;
   onAdd?: () => void;
   adding?: boolean;
@@ -177,6 +195,7 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
   onResolve?: () => void;
   resolving?: boolean;
   streamId?: string;
+  onPlay?: (streamId: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -308,6 +327,17 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
 
       {streamUrl && (
         <div className="flex items-center gap-3 px-2 py-2 rounded bg-emerald-950/40 border border-emerald-800/30">
+          {onPlay && streamId && (
+            <button
+              onClick={() => onPlay(streamId)}
+              className="flex items-center gap-1.5 text-[11px] font-semibold text-white bg-brand-600 hover:bg-brand-500 px-3 py-1.5 rounded transition-colors"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+              </svg>
+              Play
+            </button>
+          )}
           <button
             onClick={handleCopy}
             className="text-[11px] font-medium text-emerald-400 hover:text-emerald-300 transition-colors"
