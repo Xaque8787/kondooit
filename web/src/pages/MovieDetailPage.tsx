@@ -40,6 +40,7 @@ export function MovieDetailPage() {
         });
         if (provider) p.set("provider", provider);
         if (movie.external_id) p.set("eid", String(movie.external_id));
+        if (res.auto_play_session) p.set("aps", res.auto_play_session);
         navigate(`/player?${p.toString()}`);
       } else {
         setAutoPlayError(res.detail || "No playable source found");

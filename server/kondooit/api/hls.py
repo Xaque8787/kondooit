@@ -53,12 +53,8 @@ class ProbeResult:
     video_bit_depth: int = 8
 
 
-async def ffprobe_url(url: str, headers: dict[str, str] | None = None) -> ProbeResult | None:
+async def ffprobe_url(url: str, header_str: str = "") -> ProbeResult | None:
     """Run ffprobe on a URL to detect codecs and duration."""
-    header_str = ""
-    if headers:
-        for k, v in headers.items():
-            header_str += f"{k}: {v}\r\n"
 
     cmd = [
         "ffprobe",
@@ -232,13 +228,20 @@ def decide_codecs(
 
 
 def _build_input_url(handle: StreamHandle) -> str:
+    return handle.upstream_url
+
+
+def _build_auth_headers(handle: StreamHandle) -> str:
+    """Build FFmpeg -headers string including auth if present."""
+    import base64
+    parts: list[str] = []
     if handle.upstream_auth:
         user, pw = handle.upstream_auth
-        url = handle.upstream_url
-        scheme_end = url.find("://")
-        if scheme_end >= 0:
-            return url[:scheme_end + 3] + f"{user}:{pw}@" + url[scheme_end + 3:]
-    return handle.upstream_url
+        token = base64.b64encode(f"{user}:{pw}".encode()).decode()
+        parts.append(f"Authorization: Basic {token}\r\n")
+    for k, v in handle.upstream_headers.items():
+        parts.append(f"{k}: {v}\r\n")
+    return "".join(parts)
 
 
 class HlsSession:
@@ -281,10 +284,7 @@ class HlsSession:
         playlist_path = self.output_dir / "stream.m3u8"
         segment_pattern = self.output_dir / "seg_%05d.ts"
 
-        input_headers = ""
-        for k, v in self.handle.upstream_headers.items():
-            input_headers += f"{k}: {v}\r\n"
-
+        input_headers = _build_auth_headers(self.handle)
         cmd_input = _build_input_url(self.handle)
 
         # Decide codecs
@@ -424,12 +424,19 @@ class HlsSession:
         self.last_access = time.monotonic()
 
 
+MAX_STREAM_FAILURES = 3
+
+
 class HlsSessionManager:
     """Manages active HLS sessions."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, HlsSession] = {}
         self._probes: dict[str, ProbeResult] = {}
+        self._failure_counts: dict[str, int] = {}
+
+    def is_permanently_failed(self, stream_id: str) -> bool:
+        return self._failure_counts.get(stream_id, 0) >= MAX_STREAM_FAILURES
 
     async def get_or_create(
         self,
@@ -437,10 +444,18 @@ class HlsSessionManager:
         handle: StreamHandle,
         client_video_codecs: set[str] | None = None,
         client_audio_codecs: set[str] | None = None,
-    ) -> HlsSession:
+    ) -> HlsSession | None:
+        if self.is_permanently_failed(stream_id):
+            return None
+
         if stream_id in self._sessions:
             session = self._sessions[stream_id]
             if session.failed:
+                self._failure_counts[stream_id] = self._failure_counts.get(stream_id, 0) + 1
+                if self._failure_counts[stream_id] >= MAX_STREAM_FAILURES:
+                    logger.error("Stream %s permanently failed after %d attempts", stream_id, self._failure_counts[stream_id])
+                    await self.remove(stream_id)
+                    return None
                 await self.remove(stream_id)
             else:
                 session.touch()
@@ -452,7 +467,7 @@ class HlsSessionManager:
         probe = self._probes.get(stream_id)
         if probe is None:
             input_url = _build_input_url(handle)
-            probe = await ffprobe_url(input_url, handle.upstream_headers or None)
+            probe = await ffprobe_url(input_url, _build_auth_headers(handle))
             if probe:
                 self._probes[stream_id] = probe
 
@@ -506,9 +521,11 @@ class HlsSessionManager:
     def get_probe(self, stream_id: str) -> ProbeResult | None:
         return self._probes.get(stream_id)
 
-    async def remove(self, stream_id: str) -> None:
+    async def remove(self, stream_id: str, clear_failure_count: bool = False) -> None:
         session = self._sessions.pop(stream_id, None)
         self._probes.pop(stream_id, None)
+        if clear_failure_count:
+            self._failure_counts.pop(stream_id, None)
         if session:
             await session.stop()
             session.cleanup_files()
@@ -553,7 +570,7 @@ class HlsController(Controller):
         probe = hls_manager.get_probe(stream_id)
         if probe is None:
             input_url = _build_input_url(handle)
-            probe = await ffprobe_url(input_url, handle.upstream_headers or None)
+            probe = await ffprobe_url(input_url, _build_auth_headers(handle))
             if probe:
                 hls_manager._probes[stream_id] = probe
 
@@ -605,6 +622,14 @@ class HlsController(Controller):
             client_video_codecs=client_vc,
             client_audio_codecs=client_ac,
         )
+
+        if session is None:
+            return Response(
+                content="Stream permanently failed after multiple attempts",
+                status_code=410,
+                media_type="text/plain",
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
 
         if session.failed:
             return Response(
@@ -745,5 +770,5 @@ class HlsController(Controller):
         stream_id: str,
         hls_manager: HlsSessionManager,
     ) -> Response:
-        await hls_manager.remove(stream_id)
+        await hls_manager.remove(stream_id, clear_failure_count=True)
         return Response(content={"stopped": True}, status_code=200)

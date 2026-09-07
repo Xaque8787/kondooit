@@ -221,7 +221,7 @@ export const api = {
     }),
 
   autoPlay: (title: string, year?: number, season?: number, episode?: number, tmdb_id?: number, content_type?: string) =>
-    request<{ success: boolean; detail: string; stream_id: string | null; source: SourceResult | null }>("/source-providers/auto-play", {
+    request<{ success: boolean; detail: string; stream_id: string | null; source: SourceResult | null; auto_play_session: string | null }>("/source-providers/auto-play", {
       method: "POST",
       body: JSON.stringify({
         title,
@@ -231,6 +231,12 @@ export const api = {
         tmdb_id: tmdb_id ?? null,
         content_type: content_type ?? "movie",
       }),
+    }),
+
+  autoPlayNext: (autoPlaySession: string, failedStreamId: string) =>
+    request<{ success: boolean; detail: string; stream_id: string | null; source: SourceResult | null; auto_play_session: string | null }>("/source-providers/auto-play/next", {
+      method: "POST",
+      body: JSON.stringify({ auto_play_session: autoPlaySession, failed_stream_id: failedStreamId }),
     }),
 
   addTorrent: (info_hash: string, provider_key: string = "torbox") =>

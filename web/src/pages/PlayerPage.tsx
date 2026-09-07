@@ -73,7 +73,9 @@ export function PlayerPage() {
   const progressInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const seekBarRef = useRef<HTMLDivElement>(null);
 
-  const streamId = params.get("stream");
+  const autoPlaySession = params.get("aps") || "";
+  const [activeStreamId, setActiveStreamId] = useState(params.get("stream") || "");
+  const streamId = activeStreamId;
   const title = params.get("title") || "Untitled";
   const providerKey = params.get("provider") || "";
   const contentType = params.get("type") || "movie";
@@ -119,6 +121,25 @@ export function PlayerPage() {
     });
   }, [providerKey, contentType, externalId, seriesExternalId, seasonNumber, episodeNumber, realDuration]);
 
+  const tryNextAutoPlaySource = useCallback(async () => {
+    if (!autoPlaySession || !streamId) return;
+    setLoading(true);
+    setLoadingMessage("Trying next source...");
+    setError("");
+    try {
+      const res = await api.autoPlayNext(autoPlaySession, streamId);
+      if (res.success && res.stream_id) {
+        setActiveStreamId(res.stream_id);
+      } else {
+        setError("All sources failed. Please go back and try manually.");
+        setLoading(false);
+      }
+    } catch {
+      setError("All sources failed. Please go back and try manually.");
+      setLoading(false);
+    }
+  }, [autoPlaySession, streamId]);
+
   const createHls = useCallback((hlsUrl: string, videoEl: HTMLVideoElement, onReady?: () => void) => {
     const hls = new Hls({
       maxBufferLength: 30,
@@ -128,7 +149,7 @@ export function PlayerPage() {
       liveSyncDuration: 0,
       liveMaxLatencyDuration: Infinity,
       manifestLoadingRetryDelay: 2000,
-      manifestLoadingMaxRetry: 30,
+      manifestLoadingMaxRetry: 5,
       debug: false,
     });
     hlsRef.current = hls;
@@ -142,22 +163,41 @@ export function PlayerPage() {
     });
 
     let mediaErrorRecoveries = 0;
+    let networkRetries = 0;
+    const MAX_NETWORK_RETRIES = 5;
     hls.on(Hls.Events.ERROR, (_event, data) => {
       console.error("[HLS ERROR]", data.type, data.details, data.fatal, data.reason, data.response?.code);
       if (data.fatal) {
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaErrorRecoveries < 3) {
           mediaErrorRecoveries++;
           hls.recoverMediaError();
-        } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 503) {
+        } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 410) {
+          hls.destroy();
+          if (autoPlaySession) {
+            tryNextAutoPlaySource();
+          } else {
+            setError("This source is not available. Please go back and try a different one.");
+            setLoading(false);
+          }
+        } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 503 && networkRetries < MAX_NETWORK_RETRIES) {
+          networkRetries++;
           setTimeout(() => hls.loadSource(hlsUrl), 2000);
+        } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 500 && networkRetries < MAX_NETWORK_RETRIES) {
+          networkRetries++;
+          setTimeout(() => hls.loadSource(hlsUrl), 3000);
         } else {
-          const detail = data.reason || data.details || data.type;
-          setError(
-            data.type === Hls.ErrorTypes.NETWORK_ERROR
-              ? `Network error: ${detail}`
-              : `Playback failed: ${detail}`
-          );
-          setLoading(false);
+          hls.destroy();
+          if (autoPlaySession && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            tryNextAutoPlaySource();
+          } else {
+            const detail = data.reason || data.details || data.type;
+            setError(
+              data.type === Hls.ErrorTypes.NETWORK_ERROR
+                ? `Stream failed: ${detail}`
+                : `Playback failed: ${detail}`
+            );
+            setLoading(false);
+          }
         }
       }
     });
@@ -213,6 +253,7 @@ export function PlayerPage() {
       setLoading(false);
       return;
     }
+    setError("");
 
     let cancelled = false;
 

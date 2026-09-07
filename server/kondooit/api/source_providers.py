@@ -8,6 +8,8 @@ search endpoint that runs scrapers + cache checks + direct search.
 from __future__ import annotations
 
 import logging
+import secrets
+import time
 
 from litestar import Controller, Request, get, put, post, delete
 from pydantic import BaseModel
@@ -23,6 +25,48 @@ from kondooit.infrastructure.scraper_module_repo import ScraperModuleRepository
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
+
+
+class AutoPlaySessionStore:
+    """Stores remaining auto-play candidates so the player can request the next source on failure."""
+
+    _TTL = 1800  # 30 minutes
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, dict] = {}
+
+    def create(self, candidates: list[SourceResult], easynews_auth: tuple[str, str] | None, query_data: dict) -> str:
+        self._sweep()
+        session_id = f"ap_{secrets.token_urlsafe(12)}"
+        self._sessions[session_id] = {
+            "candidates": candidates,
+            "index": 0,
+            "easynews_auth": easynews_auth,
+            "query_data": query_data,
+            "created_at": time.monotonic(),
+        }
+        return session_id
+
+    def get(self, session_id: str) -> dict | None:
+        s = self._sessions.get(session_id)
+        if s and time.monotonic() - s["created_at"] > self._TTL:
+            del self._sessions[session_id]
+            return None
+        return s
+
+    def advance(self, session_id: str) -> None:
+        s = self._sessions.get(session_id)
+        if s:
+            s["index"] += 1
+
+    def _sweep(self) -> None:
+        now = time.monotonic()
+        expired = [k for k, v in self._sessions.items() if now - v["created_at"] > self._TTL]
+        for k in expired:
+            del self._sessions[k]
+
+
+_auto_play_store = AutoPlaySessionStore()
 
 
 class CredentialFieldResponse(BaseModel):
@@ -106,6 +150,7 @@ class AutoPlayResponse(BaseModel):
     detail: str
     stream_id: str | None = None
     source: SourceResultResponse | None = None
+    auto_play_session: str | None = None
 
 
 class SourceResultResponse(BaseModel):
@@ -386,57 +431,45 @@ class SourceProviderController(Controller):
         if not candidates:
             return AutoPlayResponse(success=False, detail="No playable sources found")
 
-        for r in candidates:
-            stream_id = None
-            if r._upstream_url and easynews_auth:
-                stream_id = stream_store.create(
-                    provider_key=r.provider_key,
-                    upstream_url=r._upstream_url,
-                    upstream_auth=easynews_auth,
-                    filename=r.filename,
-                    content_type=r._content_type or "video/mp4",
-                )
-            elif r.stream_url and r.stream_url.startswith("http"):
-                stream_id = stream_store.create(
-                    provider_key=r.provider_key,
-                    upstream_url=r.stream_url,
-                    filename=r.filename,
-                    content_type="video/mp4",
-                )
-            elif r.info_hash:
-                resolve_result = await source_provider_service.resolve_stream(
-                    session, r.provider_key, r.info_hash, None,
-                    season=data.season, episode=data.episode,
-                )
-                raw_url = resolve_result.get("stream_url")
-                if resolve_result.get("success") and raw_url:
-                    stream_id = stream_store.create(
-                        provider_key=r.provider_key,
-                        upstream_url=raw_url,
-                        filename=r.filename,
-                        content_type="video/mp4",
-                    )
+        ap_session_id = _auto_play_store.create(
+            candidates=candidates,
+            easynews_auth=easynews_auth,
+            query_data={"season": data.season, "episode": data.episode},
+        )
 
-            if stream_id:
-                source_resp = SourceResultResponse(
-                    provider_key=r.provider_key,
-                    filename=r.filename,
-                    size_bytes=r.size_bytes,
-                    quality=r.quality,
-                    codec=r.codec,
-                    duration_seconds=r.duration_seconds,
-                    info_hash=r.info_hash,
-                    seeders=r.seeders,
-                    source_type=r.source_type,
-                    scraper_source=r.scraper_source,
-                    stream_id=stream_id,
-                    is_season_pack=r.is_season_pack,
-                    file_count=r.file_count,
-                    playback_compatibility=r.playback_compatibility,
-                )
-                return AutoPlayResponse(success=True, detail="ok", stream_id=stream_id, source=source_resp)
-
+        result = await _resolve_next_auto_play(
+            ap_session_id, session, source_provider_service, stream_store,
+        )
+        if result:
+            return result
         return AutoPlayResponse(success=False, detail="Could not resolve any playable source")
+
+    @post("/auto-play/next")
+    async def auto_play_next(
+        self,
+        data: dict,
+        session: AsyncSession,
+        source_provider_service: SourceProviderService,
+        stream_store: StreamHandleStore,
+    ) -> AutoPlayResponse:
+        ap_session_id = data.get("auto_play_session", "")
+        failed_stream_id = data.get("failed_stream_id", "")
+
+        if failed_stream_id:
+            stream_store.remove(failed_stream_id)
+
+        ap = _auto_play_store.get(ap_session_id)
+        if not ap:
+            return AutoPlayResponse(success=False, detail="Auto-play session expired or not found")
+
+        _auto_play_store.advance(ap_session_id)
+
+        result = await _resolve_next_auto_play(
+            ap_session_id, session, source_provider_service, stream_store,
+        )
+        if result:
+            return result
+        return AutoPlayResponse(success=False, detail="No more sources to try")
 
     @post("/add-torrent")
     async def add_torrent(
@@ -721,3 +754,82 @@ def _apply_profile_preferences(results: list[SourceResult], profile: Profile) ->
     ))
 
     return filtered
+
+
+async def _resolve_next_auto_play(
+    ap_session_id: str,
+    session: AsyncSession,
+    source_provider_service: SourceProviderService,
+    stream_store: StreamHandleStore,
+) -> AutoPlayResponse | None:
+    """Try to resolve the next candidate in an auto-play session. Returns None if exhausted."""
+    ap = _auto_play_store.get(ap_session_id)
+    if not ap:
+        return None
+
+    candidates = ap["candidates"]
+    easynews_auth = ap["easynews_auth"]
+    query_data = ap["query_data"]
+    start_index = ap["index"]
+
+    for i in range(start_index, len(candidates)):
+        r = candidates[i]
+        ap["index"] = i
+        stream_id = None
+
+        if r._upstream_url and easynews_auth:
+            stream_id = stream_store.create(
+                provider_key=r.provider_key,
+                upstream_url=r._upstream_url,
+                upstream_auth=easynews_auth,
+                filename=r.filename,
+                content_type=r._content_type or "video/mp4",
+            )
+        elif r.stream_url and r.stream_url.startswith("http"):
+            stream_id = stream_store.create(
+                provider_key=r.provider_key,
+                upstream_url=r.stream_url,
+                filename=r.filename,
+                content_type="video/mp4",
+            )
+        elif r.info_hash:
+            resolve_result = await source_provider_service.resolve_stream(
+                session, r.provider_key, r.info_hash, None,
+                season=query_data.get("season"), episode=query_data.get("episode"),
+            )
+            raw_url = resolve_result.get("stream_url")
+            if resolve_result.get("success") and raw_url:
+                stream_id = stream_store.create(
+                    provider_key=r.provider_key,
+                    upstream_url=raw_url,
+                    filename=r.filename,
+                    content_type="video/mp4",
+                )
+
+        if stream_id:
+            remaining = len(candidates) - i - 1
+            logger.info("Auto-play resolved source %d/%d (%s), %d remaining", i + 1, len(candidates), r.filename, remaining)
+            return AutoPlayResponse(
+                success=True,
+                detail="ok",
+                stream_id=stream_id,
+                auto_play_session=ap_session_id,
+                source=SourceResultResponse(
+                    provider_key=r.provider_key,
+                    filename=r.filename,
+                    size_bytes=r.size_bytes,
+                    quality=r.quality,
+                    codec=r.codec,
+                    duration_seconds=r.duration_seconds,
+                    info_hash=r.info_hash,
+                    seeders=r.seeders,
+                    source_type=r.source_type,
+                    scraper_source=r.scraper_source,
+                    stream_id=stream_id,
+                    is_season_pack=r.is_season_pack,
+                    file_count=r.file_count,
+                    playback_compatibility=r.playback_compatibility,
+                ),
+            )
+
+    return None

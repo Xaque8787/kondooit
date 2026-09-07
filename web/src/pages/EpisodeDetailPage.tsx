@@ -69,6 +69,7 @@ export function EpisodeDetailPage() {
         p.set("series_eid", String(seriesIdNum));
         p.set("season", String(epData.season_number));
         p.set("episode", String(epData.episode_number));
+        if (res.auto_play_session) p.set("aps", res.auto_play_session);
         navigate(`/player?${p.toString()}`);
       } else {
         setAutoPlayError(res.detail || "No playable source found");
