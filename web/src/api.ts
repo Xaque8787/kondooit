@@ -355,4 +355,21 @@ export const api = {
 
   getSeriesProgress: (providerKey: string, seriesExternalId: number) =>
     request<WatchProgressResponse[]>(`/watch-progress/series/${providerKey}/${seriesExternalId}`),
+
+  // Playback (companion)
+  playOnCompanion: (data: {
+    stream_url: string;
+    title?: string;
+    provider_key?: string;
+    content_type?: string;
+    external_id?: number;
+    duration_seconds?: number;
+    series_external_id?: number;
+    season_number?: number;
+    episode_number?: number;
+  }) =>
+    request<{ status: string }>("/playback/play", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
 };

@@ -37,5 +37,27 @@ services:
     depends_on:
       - server
 
+  # Companion player — launches mpv on the host's display.
+  # Requires X11/Wayland + PulseAudio/PipeWire on the host.
+  # Uncomment and set KONDOOIT_USERNAME / KONDOOIT_PASSWORD to use.
+  #
+  # companion:
+  #   build:
+  #     context: ./companion
+  #   environment:
+  #     DISPLAY: "${DISPLAY:-:0}"
+  #     PULSE_SERVER: "unix:/run/user/1000/pulse/native"
+  #     KONDOOIT_SERVER: "http://server:8000"
+  #     KONDOOIT_USERNAME: "admin"
+  #     KONDOOIT_PASSWORD: "changeme"
+  #   volumes:
+  #     - /tmp/.X11-unix:/tmp/.X11-unix:ro
+  #     - /run/user/1000/pulse:/run/user/1000/pulse:ro
+  #   devices:
+  #     - /dev/dri:/dev/dri
+  #   command: ["--server", "http://server:8000", "--username", "${KONDOOIT_USERNAME:-admin}", "--password", "${KONDOOIT_PASSWORD:-changeme}"]
+  #   depends_on:
+  #     - server
+
 volumes:
   pgdata:

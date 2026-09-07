@@ -2,6 +2,17 @@ import { useState } from "react";
 import { api } from "../api";
 import type { SourceResult } from "../types";
 
+interface ContentMeta {
+  title: string;
+  year?: number;
+  season?: number;
+  episode?: number;
+  tmdbId?: number;
+  contentType?: string;
+  seriesTmdbId?: number;
+  durationSeconds?: number;
+}
+
 function formatSize(bytes: number): string {
   if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + " GB";
   if (bytes >= 1048576) return (bytes / 1048576).toFixed(0) + " MB";
@@ -130,6 +141,7 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
                   <SourceRow
                     key={`instant-${i}`}
                     result={r}
+                    contentMeta={{ title, year, season, episode, tmdbId, contentType, durationSeconds: r.duration_seconds ?? undefined }}
                     onResolve={r.info_hash ? () => handleResolve(r.info_hash!, r.provider_key) : undefined}
                     resolving={r.info_hash === resolvingHash}
                     streamId={r.stream_id || (r.info_hash ? resolvedStreamIds[r.info_hash] : undefined) || undefined}
@@ -169,8 +181,9 @@ export function SourceSearchPanel({ title, year, season, episode, tmdbId, conten
   );
 }
 
-function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, streamId }: {
+function SourceRow({ result: r, contentMeta, onAdd, adding, added, onResolve, resolving, streamId }: {
   result: SourceResult;
+  contentMeta?: ContentMeta;
   onAdd?: () => void;
   adding?: boolean;
   added?: boolean;
@@ -179,6 +192,7 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
   streamId?: string;
 }) {
   const [copied, setCopied] = useState(false);
+  const [sent, setSent] = useState(false);
 
   const streamUrl = streamId
     ? `${window.location.origin}/api/streams/${streamId}`
@@ -189,6 +203,27 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
       navigator.clipboard.writeText(streamUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const handlePlayCompanion = async () => {
+    if (!streamUrl) return;
+    try {
+      await api.playOnCompanion({
+        stream_url: streamUrl,
+        title: contentMeta?.title ?? r.filename,
+        provider_key: r.provider_key,
+        content_type: contentMeta?.contentType ?? "movie",
+        external_id: contentMeta?.tmdbId ?? 0,
+        duration_seconds: contentMeta?.durationSeconds ?? (r.duration_seconds ?? 0),
+        series_external_id: contentMeta?.seriesTmdbId ?? undefined,
+        season_number: contentMeta?.season ?? undefined,
+        episode_number: contentMeta?.episode ?? undefined,
+      });
+      setSent(true);
+      setTimeout(() => setSent(false), 3000);
+    } catch {
+      /* companion may not be running */
     }
   };
 
@@ -308,6 +343,12 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
 
       {streamUrl && (
         <div className="flex items-center gap-3 px-2 py-2 rounded bg-emerald-950/40 border border-emerald-800/30">
+          <button
+            onClick={handlePlayCompanion}
+            className="text-[11px] font-medium text-sky-400 hover:text-sky-300 transition-colors"
+          >
+            {sent ? "Sent!" : "Play"}
+          </button>
           <button
             onClick={handleCopy}
             className="text-[11px] font-medium text-emerald-400 hover:text-emerald-300 transition-colors"
