@@ -435,7 +435,7 @@ class SourceProviderService:
                 tasks.append(self._run_single_scraper_movie(
                     scraper.instance, imdb_id, query.title, query.year or 0, scraper_config,
                 ))
-            elif query.content_type == "series" and "series" in scraper.content_types:
+            elif query.content_type in ("series", "episode") and "series" in scraper.content_types:
                 if query.season is not None and query.episode is not None:
                     logger.info("Dispatching scraper '%s' for episode imdb=%s S%02dE%02d", scraper.key, imdb_id, query.season, query.episode)
                     tasks.append(self._run_single_scraper_episode(
