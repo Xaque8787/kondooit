@@ -57,11 +57,8 @@ export function PlayerPage() {
     if (Hls.isSupported()) {
       const hls = new Hls({
         maxBufferLength: 30,
-        maxMaxBufferLength: 60,
+        maxMaxBufferLength: 120,
         startLevel: -1,
-        startPosition: 0,
-        liveSyncDuration: 0,
-        liveMaxLatencyDuration: Infinity,
         debug: false,
       });
       hlsRef.current = hls;
@@ -76,18 +73,16 @@ export function PlayerPage() {
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            if (data.response?.code === 503) {
-              setTimeout(() => hls.loadSource(hlsUrl), 2000);
-              return;
-            }
-            setError("Network error — could not load stream");
-          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
             hls.recoverMediaError();
           } else {
-            setError("Playback failed");
+            setError(
+              data.type === Hls.ErrorTypes.NETWORK_ERROR
+                ? "Network error — could not load stream"
+                : "Playback failed"
+            );
+            setLoading(false);
           }
-          setLoading(false);
         }
       });
 
