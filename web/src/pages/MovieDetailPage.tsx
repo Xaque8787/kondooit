@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api } from "../api";
-import type { MovieDetail, UserContentState } from "../types";
+import type { MovieDetail, UserContentState, WatchProgressResponse } from "../types";
 import {
   Backdrop,
   Poster,
@@ -18,21 +18,29 @@ export function MovieDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [contentState, setContentState] = useState<UserContentState | null>(null);
+  const [watchProgress, setWatchProgress] = useState<WatchProgressResponse | null>(null);
   const [toggling, setToggling] = useState(false);
+  const [watchToggling, setWatchToggling] = useState(false);
 
   useEffect(() => {
     if (!provider || !id) return;
+    const eid = parseInt(id, 10);
     setLoading(true);
     api
-      .getMovieDetail(provider, parseInt(id, 10))
+      .getMovieDetail(provider, eid)
       .then(setMovie)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
 
     api
-      .getContentState(provider, "movie", parseInt(id, 10))
+      .getContentState(provider, "movie", eid)
       .then(setContentState)
       .catch(() => setContentState(null));
+
+    api
+      .getWatchProgress(provider, "movie", eid)
+      .then(setWatchProgress)
+      .catch(() => setWatchProgress(null));
   }, [provider, id]);
 
   const handleToggleFavorite = async () => {
@@ -140,7 +148,54 @@ export function MovieDetailPage() {
                 </svg>
                 {contentState?.is_following ? "Following" : "Follow"}
               </button>
+              <button
+                onClick={async () => {
+                  if (!provider || !id || watchToggling) return;
+                  setWatchToggling(true);
+                  try {
+                    const eid = parseInt(id, 10);
+                    if (watchProgress?.watched) {
+                      const result = await api.markUnwatched({ provider_key: provider, content_type: "movie", external_id: eid });
+                      setWatchProgress(result);
+                    } else {
+                      const result = await api.markWatched({ provider_key: provider, content_type: "movie", external_id: eid });
+                      setWatchProgress(result);
+                    }
+                  } catch { /* retry on next click */ }
+                  finally { setWatchToggling(false); }
+                }}
+                disabled={watchToggling}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                  watchProgress?.watched
+                    ? "bg-emerald-600/20 text-emerald-400 border border-emerald-600/40"
+                    : "bg-ink-800 text-ink-300 border border-ink-700 hover:bg-ink-700"
+                }`}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+                </svg>
+                {watchProgress?.watched ? "Watched" : "Mark Watched"}
+              </button>
             </div>
+
+            {/* Progress bar */}
+            {watchProgress && watchProgress.position_seconds > 0 && !watchProgress.watched && (
+              <div className="mb-4">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xs text-ink-400">
+                    {Math.floor(watchProgress.position_seconds / 60)}m of{" "}
+                    {Math.floor(watchProgress.duration_seconds / 60)}m watched
+                  </span>
+                  <span className="text-xs text-ink-500">({watchProgress.progress_percent}%)</span>
+                </div>
+                <div className="w-full max-w-xs h-1.5 bg-ink-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-brand-500 rounded-full transition-all"
+                    style={{ width: `${watchProgress.progress_percent}%` }}
+                  />
+                </div>
+              </div>
+            )}
 
             <GenreBadges
               genres={movie.genres.map((g) => ({

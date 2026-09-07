@@ -133,3 +133,50 @@ TO anon, authenticated USING (true) WITH CHECK (true);
 DROP POLICY IF EXISTS "anon_delete_scraper_settings" ON scraper_settings;
 CREATE POLICY "anon_delete_scraper_settings" ON scraper_settings FOR DELETE
 TO anon, authenticated USING (true);
+
+-- Watch progress (per-profile playback position and watched status)
+CREATE TABLE IF NOT EXISTS watch_progress (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  profile_id uuid,
+  provider_key text NOT NULL,
+  content_type text NOT NULL CHECK (content_type IN ('movie', 'episode')),
+  external_id integer NOT NULL,
+  series_external_id integer,
+  season_number integer,
+  episode_number integer,
+  position_seconds real NOT NULL DEFAULT 0,
+  duration_seconds real NOT NULL DEFAULT 0,
+  watched boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_watch_progress_user_profile_content
+  ON watch_progress (user_id, COALESCE(profile_id, '00000000-0000-0000-0000-000000000000'), provider_key, content_type, external_id);
+
+CREATE INDEX IF NOT EXISTS idx_watch_progress_continue
+  ON watch_progress (user_id, profile_id, updated_at DESC)
+  WHERE watched = false AND position_seconds > 0;
+
+CREATE INDEX IF NOT EXISTS idx_watch_progress_watched
+  ON watch_progress (user_id, profile_id, watched)
+  WHERE watched = true;
+
+ALTER TABLE watch_progress ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "select_own_progress" ON watch_progress;
+CREATE POLICY "select_own_progress" ON watch_progress FOR SELECT
+  TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "insert_own_progress" ON watch_progress;
+CREATE POLICY "insert_own_progress" ON watch_progress FOR INSERT
+  TO authenticated WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "update_own_progress" ON watch_progress;
+CREATE POLICY "update_own_progress" ON watch_progress FOR UPDATE
+  TO authenticated USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "delete_own_progress" ON watch_progress;
+CREATE POLICY "delete_own_progress" ON watch_progress FOR DELETE
+  TO authenticated USING (auth.uid() = user_id);

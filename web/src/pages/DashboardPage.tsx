@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../auth";
 import { api } from "../api";
-import type { DiscoverySection, DiscoveryGenre, DiscoveredMovie, DiscoveredSeries } from "../types";
+import type { DiscoverySection, DiscoveryGenre, DiscoveredMovie, DiscoveredSeries, WatchProgressResponse } from "../types";
 import { Poster, Rating, LoadingSpinner, ErrorState, EmptyState } from "../components/ui";
 
 type MediaFilter = "all" | "movie" | "series";
@@ -23,15 +23,18 @@ export function DashboardPage() {
 
   const [discoverResults, setDiscoverResults] = useState<(DiscoveredMovie | DiscoveredSeries)[]>([]);
   const [discovering, setDiscovering] = useState(false);
+  const [continueWatching, setContinueWatching] = useState<WatchProgressResponse[]>([]);
 
   useEffect(() => {
     Promise.all([
       api.getLandingPage(),
       api.getDiscoveryGenres(),
+      api.getContinueWatching(10),
     ])
-      .then(([s, g]) => {
+      .then(([s, g, cw]) => {
         setSections(s);
         setGenres(g);
+        setContinueWatching(cw);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -322,6 +325,37 @@ export function DashboardPage() {
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Continue Watching */}
+      {!loading && continueWatching.length > 0 && !isSearchMode && !isGenreFiltering && (
+        <div className="mb-10">
+          <h2 className="text-xl font-semibold text-ink-100 mb-4">Continue Watching</h2>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+            {continueWatching.map((item) => {
+              const link = item.content_type === "movie"
+                ? `/movie/${item.provider_key}/${item.external_id}`
+                : `/series/${item.provider_key}/${item.series_external_id}`;
+              const label = item.content_type === "episode" && item.season_number && item.episode_number
+                ? `S${item.season_number}E${item.episode_number}`
+                : "Movie";
+              return (
+                <Link key={`cw-${item.provider_key}-${item.external_id}`} to={link} className="group">
+                  <div className="card aspect-video overflow-hidden relative bg-ink-800 flex items-center justify-center">
+                    <span className="text-ink-500 text-sm">{label}</span>
+                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-ink-700">
+                      <div className="h-full bg-brand-500" style={{ width: `${item.progress_percent}%` }} />
+                    </div>
+                  </div>
+                  <div className="mt-2">
+                    <p className="text-sm text-ink-200 truncate">{label}</p>
+                    <p className="text-xs text-ink-500">{Math.floor(item.position_seconds / 60)}m / {Math.floor(item.duration_seconds / 60)}m</p>
+                  </div>
+                </Link>
+              );
+            })}
+          </div>
         </div>
       )}
 

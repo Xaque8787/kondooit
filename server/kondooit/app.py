@@ -23,6 +23,7 @@ from kondooit.api.providers import ProviderController
 from kondooit.api.source_providers import SourceProviderController
 from kondooit.api.streams import StreamController
 from kondooit.api.user_state import UserStateController
+from kondooit.api.watch_progress import WatchProgressController
 from kondooit.application.auth_service import AuthService
 from kondooit.application.profile_service import ProfileService
 from kondooit.application.catalog_service import CatalogService
@@ -36,6 +37,7 @@ from kondooit.application.source_provider_service import (
 )
 from kondooit.application.stream_store import StreamHandleStore
 from kondooit.application.user_state_service import UserContentStateService
+from kondooit.application.watch_progress_service import WatchProgressService
 from kondooit.config import Settings, get_settings
 from kondooit.infrastructure.database import create_engine, create_session_factory
 from kondooit.infrastructure.providers.easynews import EasynewsProvider
@@ -57,6 +59,7 @@ from kondooit.infrastructure.scraper_module_repo import ScraperModuleRepository
 from kondooit.infrastructure.source_provider_repo import SqlAlchemySourceProviderConfigRepository
 from kondooit.infrastructure.profile_repo import SqlAlchemyProfileRepository
 from kondooit.infrastructure.user_state_repo import SqlAlchemyUserContentStateRepository
+from kondooit.infrastructure.watch_progress_repo import SqlAlchemyWatchProgressRepository
 from kondooit.infrastructure.security import BcryptPasswordHasher, JwtTokenService
 
 logger = logging.getLogger(__name__)
@@ -134,6 +137,10 @@ def create_app(settings: Settings | None = None) -> Litestar:
     user_state_repo = SqlAlchemyUserContentStateRepository()
     user_state_service = UserContentStateService(user_state_repo)
 
+    # Watch progress service (playback position + watched status)
+    watch_progress_repo = SqlAlchemyWatchProgressRepository()
+    watch_progress_service = WatchProgressService(watch_progress_repo)
+
     @asynccontextmanager
     async def lifespan(app: Litestar) -> AsyncIterator[None]:
         app.state.session_factory = session_factory
@@ -202,8 +209,11 @@ def create_app(settings: Settings | None = None) -> Litestar:
     async def provide_profile_service() -> AsyncIterator[ProfileService]:
         yield profile_service
 
+    async def provide_watch_progress_service() -> AsyncIterator[WatchProgressService]:
+        yield watch_progress_service
+
     return Litestar(
-        route_handlers=[health, AuthController, ProfileController, ProviderController, SourceProviderController, StreamController, CatalogController, DiscoveryController, UserStateController],
+        route_handlers=[health, AuthController, ProfileController, ProviderController, SourceProviderController, StreamController, CatalogController, DiscoveryController, UserStateController, WatchProgressController],
         lifespan=[lifespan],
         dependencies={
             "session": provide_session,
@@ -216,6 +226,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "scraper_module_repo": provide_scraper_module_repo,
             "stream_store": provide_stream_store,
             "profile_service": provide_profile_service,
+            "watch_progress_service": provide_watch_progress_service,
         },
         debug=settings.debug,
     )

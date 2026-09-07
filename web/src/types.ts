@@ -362,3 +362,17 @@ export interface ModuleInstallResponse {
   description: string;
   scrapers: ScraperInfo[];
 }
+
+export interface WatchProgressResponse {
+  provider_key: string;
+  content_type: string;
+  external_id: number;
+  series_external_id: number | null;
+  season_number: number | null;
+  episode_number: number | null;
+  position_seconds: number;
+  duration_seconds: number;
+  progress_percent: number;
+  watched: boolean;
+  updated_at: string | null;
+}

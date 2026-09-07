@@ -22,6 +22,7 @@ import type {
   MovieDetail,
   SeriesDetail,
   ProviderCapabilities,
+  WatchProgressResponse,
 } from "./types";
 
 const API_BASE = "/api";
@@ -278,4 +279,80 @@ export const api = {
 
   deleteProfile: (profileId: string) =>
     request<void>(`/profiles/${profileId}`, { method: "DELETE" }),
+
+  // Watch progress
+  reportProgress: (data: {
+    provider_key: string;
+    content_type: string;
+    external_id: number;
+    position_seconds: number;
+    duration_seconds: number;
+    series_external_id?: number;
+    season_number?: number;
+    episode_number?: number;
+  }) =>
+    request<WatchProgressResponse>("/watch-progress/report", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  beaconProgress: (data: {
+    provider_key: string;
+    content_type: string;
+    external_id: number;
+    position_seconds: number;
+    duration_seconds: number;
+    series_external_id?: number;
+    season_number?: number;
+    episode_number?: number;
+  }) => {
+    const token = getToken();
+    const profileId = getProfileId();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    if (profileId) headers["X-Profile-Id"] = profileId;
+    try {
+      fetch(`${API_BASE}/watch-progress/beacon`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(data),
+        keepalive: true,
+      });
+    } catch { /* best-effort on teardown */ }
+  },
+
+  markWatched: (data: {
+    provider_key: string;
+    content_type: string;
+    external_id: number;
+    series_external_id?: number;
+    season_number?: number;
+    episode_number?: number;
+  }) =>
+    request<WatchProgressResponse>("/watch-progress/mark-watched", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  markUnwatched: (data: {
+    provider_key: string;
+    content_type: string;
+    external_id: number;
+  }) =>
+    request<WatchProgressResponse>("/watch-progress/mark-unwatched", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  getWatchProgress: (providerKey: string, contentType: string, externalId: number) =>
+    request<WatchProgressResponse>(`/watch-progress/get/${providerKey}/${contentType}/${externalId}`),
+
+  getContinueWatching: (limit = 20) =>
+    request<WatchProgressResponse[]>(`/watch-progress/continue-watching?limit=${limit}`),
+
+  getWatched: (contentType?: string, limit = 100) =>
+    request<WatchProgressResponse[]>(`/watch-progress/watched?limit=${limit}${contentType ? `&content_type=${contentType}` : ""}`),
+
+  getSeriesProgress: (providerKey: string, seriesExternalId: number) =>
+    request<WatchProgressResponse[]>(`/watch-progress/series/${providerKey}/${seriesExternalId}`),
 };
