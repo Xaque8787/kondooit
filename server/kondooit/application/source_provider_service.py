@@ -328,7 +328,7 @@ class SourceProviderService:
                     size_bytes=sr.size_bytes or 0,
                     quality=_detect_quality(sr.title),
                     codec=_detect_codec(sr.title),
-                    source_type="direct",
+                    source_type="scraper_direct",
                     scraper_source=sr.source,
                     stream_url=sr.stream_url,
                 ))
@@ -349,7 +349,7 @@ class SourceProviderService:
                 scraper_source=sr.source,
             ))
 
-        source_type_order = {"direct": 0, "in_library": 1, "cached_torrent": 2, "uncached_torrent": 3}
+        source_type_order = {"direct": 0, "in_library": 1, "cached_torrent": 2, "scraper_direct": 3, "uncached_torrent": 4}
         quality_order = {"2160p": 0, "1080p": 1, "720p": 2, "480p": 3, "": 4}
         all_results.sort(
             key=lambda r: (

@@ -94,7 +94,7 @@ class SourceResult:
     # Torrent-specific fields (populated by CACHE_CHECK results)
     info_hash: str | None = None
     seeders: int | None = None
-    source_type: str = "direct"  # "direct", "cached_torrent", "in_library", "uncached_torrent"
+    source_type: str = "direct"  # "direct", "cached_torrent", "in_library", "scraper_direct", "uncached_torrent"
     scraper_source: str | None = None  # which scraper discovered this hash
     stream_url: str | None = None
     stream_id: str | None = None

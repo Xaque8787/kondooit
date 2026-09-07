@@ -37,7 +37,7 @@
       "category": "aggregator",
       "content_types": ["movie", "series"],
       "tier": 1,
-      "default_enabled": false,
+      "default_enabled": true,
       "config_schema": {
         "stream_type": {
           "type": "select",
