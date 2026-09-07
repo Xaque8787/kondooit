@@ -362,6 +362,21 @@ class SourceProviderController(Controller):
 
         instant_types = {"direct", "cached_torrent", "in_library"}
         candidates = [r for r in results if r.source_type in instant_types]
+
+        def _is_invalid_url(url: str | None) -> bool:
+            if not url:
+                return True
+            bad_patterns = ("/exceptions/", "/invalid_config", "/error", "/static/exceptions")
+            return any(p in url.lower() for p in bad_patterns)
+
+        candidates = [
+            r for r in candidates
+            if not (r.source_type == "direct" and _is_invalid_url(r.stream_url or r._upstream_url))
+        ]
+
+        type_priority = {"in_library": 0, "cached_torrent": 1, "direct": 2}
+        candidates.sort(key=lambda r: type_priority.get(r.source_type, 9))
+
         if not candidates:
             return AutoPlayResponse(success=False, detail="No playable sources found")
 

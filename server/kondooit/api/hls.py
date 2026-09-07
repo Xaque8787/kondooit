@@ -200,6 +200,12 @@ def decide_codecs(
     if vc_normalized == "h264" and probe.video_bit_depth > 8:
         can_copy_video = False
 
+    # No audio stream at all
+    if not ac:
+        video_flags = ["-c:v", "copy"] if can_copy_video else ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22"]
+        reason = f"remux video (copy {vc}), no audio" if can_copy_video else f"transcode video ({vc}->h264), no audio"
+        return video_flags, [], reason
+
     # Audio decision
     can_copy_audio = ac_normalized in supported_audio
 
@@ -307,7 +313,9 @@ class HlsSession:
         if seek_seconds > 0:
             cmd.extend(["-ss", f"{seek_seconds:.3f}"])
 
-        cmd.extend(["-i", cmd_input, "-map", "0:v:0", "-map", "0:a:0"])
+        cmd.extend(["-i", cmd_input, "-map", "0:v:0"])
+        if audio_flags:
+            cmd.extend(["-map", "0:a:0"])
         cmd.extend(video_flags)
         cmd.extend(audio_flags)
 
