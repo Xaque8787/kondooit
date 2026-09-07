@@ -15,6 +15,9 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from kondooit.config import Settings
 from kondooit.infrastructure.models import Base
+from kondooit.infrastructure.profile_repo import ProfileModel  # noqa: F401
+from kondooit.infrastructure.user_state_repo import UserContentStateModel  # noqa: F401
+from kondooit.infrastructure.watch_progress_repo import WatchProgressModel  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:
