@@ -94,6 +94,7 @@ class HlsSession:
             "-f", "hls",
             "-hls_time", str(SEGMENT_DURATION),
             "-hls_list_size", "0",
+            "-hls_playlist_type", "event",
             "-hls_flags", "independent_segments",
             "-hls_segment_type", "fmp4",
             "-hls_fmp4_init_filename", init_segment.name,

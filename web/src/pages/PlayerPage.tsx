@@ -59,6 +59,9 @@ export function PlayerPage() {
         maxBufferLength: 30,
         maxMaxBufferLength: 60,
         startLevel: -1,
+        startPosition: 0,
+        liveSyncDuration: 0,
+        liveMaxLatencyDuration: Infinity,
         debug: false,
       });
       hlsRef.current = hls;
