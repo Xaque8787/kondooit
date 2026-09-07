@@ -231,6 +231,26 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
                 {r.codec}
               </span>
             )}
+            {r.playback_compatibility === "direct_play" && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-600/20 text-emerald-400">
+                Direct Play
+              </span>
+            )}
+            {r.playback_compatibility === "remux" && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-sky-600/20 text-sky-400">
+                Remux
+              </span>
+            )}
+            {r.playback_compatibility === "transcode" && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-600/20 text-amber-400">
+                Transcode
+              </span>
+            )}
+            {r.playback_compatibility === "incompatible" && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-600/20 text-red-400">
+                Incompatible
+              </span>
+            )}
             {r.is_season_pack && (
               <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-violet-600/20 text-violet-400">
                 Season Pack &middot; {r.file_count} episodes

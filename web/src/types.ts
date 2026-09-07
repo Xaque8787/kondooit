@@ -331,6 +331,7 @@ export interface SourceResult {
   stream_id: string | null;
   is_season_pack: boolean;
   file_count: number;
+  playback_compatibility: string;
 }
 
 export interface ScraperConfigFieldSchema {

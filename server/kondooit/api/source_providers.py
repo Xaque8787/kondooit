@@ -13,11 +13,14 @@ from litestar import Controller, Request, get, put, post, delete
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kondooit.application.source_provider_ports import SourceProviderConfig, SourceProviderStatus, SourceSearchRequest
+from kondooit.application.source_provider_ports import SourceProviderConfig, SourceProviderStatus, SourceSearchRequest, SourceResult
 from kondooit.application.source_provider_service import SourceProviderService, ScraperModuleManager
 from kondooit.application.stream_store import StreamHandleStore
+from kondooit.application.profile_service import ProfileService
+from kondooit.domain.profile import Profile
 from kondooit.infrastructure.scraper_loader import load_module
 from kondooit.infrastructure.scraper_module_repo import ScraperModuleRepository
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +106,7 @@ class SourceResultResponse(BaseModel):
     stream_id: str | None = None
     is_season_pack: bool = False
     file_count: int = 0
+    playback_compatibility: str = "unknown"
 
 
 class ScraperConfigFieldSchema(BaseModel):
@@ -241,9 +245,11 @@ class SourceProviderController(Controller):
     @post("/search")
     async def search_sources(
         self,
+        request: Request,
         data: SourceSearchRequestBody,
         session: AsyncSession,
         source_provider_service: SourceProviderService,
+        profile_service: ProfileService,
         stream_store: StreamHandleStore,
     ) -> list[SourceResultResponse]:
         query = SourceSearchRequest(
@@ -255,6 +261,10 @@ class SourceProviderController(Controller):
             content_type=data.content_type,
         )
         results = await source_provider_service.search_sources(session, query)
+
+        profile = await _get_active_profile(request, session, profile_service)
+        if profile:
+            results = _apply_profile_preferences(results, profile)
 
         easynews_auth = await self._get_easynews_auth(session, source_provider_service)
 
@@ -290,6 +300,7 @@ class SourceProviderController(Controller):
                 stream_id=stream_id,
                 is_season_pack=r.is_season_pack,
                 file_count=r.file_count,
+                playback_compatibility=r.playback_compatibility,
             ))
         return responses
 
@@ -513,3 +524,80 @@ class SourceProviderController(Controller):
             key=key, name=key, tier=1, category="unknown",
             content_types=[], enabled=data.enabled,
         )
+
+
+async def _get_active_profile(
+    request: Request,
+    session: AsyncSession,
+    profile_service: ProfileService,
+) -> Profile | None:
+    profile_id = request.headers.get("X-Profile-Id")
+    if not profile_id:
+        return None
+    try:
+        return await profile_service.get_profile(session, UUID(profile_id))
+    except (ValueError, Exception):
+        return None
+
+
+_RESOLUTION_VALUES = {"2160p": 2160, "1080p": 1080, "720p": 720, "480p": 480}
+
+_CODEC_MAP = {
+    "H.264": "h264",
+    "HEVC": "hevc",
+    "AV1": "av1",
+    "VP9": "vp9",
+}
+
+
+def _compute_compatibility(result: SourceResult, profile: Profile) -> str:
+    """Determine playback compatibility between a source and a profile's preferences."""
+    res_val = _RESOLUTION_VALUES.get(result.quality, 0)
+    if res_val > profile.max_resolution and res_val > 0:
+        return "exceeds_resolution"
+
+    source_codec = _CODEC_MAP.get(result.codec, "")
+    client_video = set(profile.client_video_codecs.split(",")) if profile.client_video_codecs else set()
+
+    if source_codec and source_codec in client_video:
+        return "direct_play"
+
+    if not source_codec:
+        return "unknown"
+
+    if profile.allow_remux:
+        return "remux"
+    if profile.allow_transcode:
+        return "transcode"
+    return "incompatible"
+
+
+def _apply_profile_preferences(results: list[SourceResult], profile: Profile) -> list[SourceResult]:
+    """Filter and re-rank results based on profile playback preferences."""
+    from dataclasses import replace
+
+    annotated = []
+    for r in results:
+        compat = _compute_compatibility(r, profile)
+        annotated.append(replace(r, playback_compatibility=compat))
+
+    filtered = [r for r in annotated if r.playback_compatibility != "exceeds_resolution"]
+    if not profile.allow_direct_play:
+        filtered = [r for r in filtered if r.playback_compatibility != "direct_play" or r.playback_compatibility == "unknown"]
+
+    if not filtered:
+        filtered = annotated
+
+    compat_order = {"direct_play": 0, "remux": 1, "transcode": 2, "unknown": 3, "incompatible": 4, "exceeds_resolution": 5}
+    source_type_order = {"direct": 0, "in_library": 1, "cached_torrent": 2, "uncached_torrent": 3}
+    quality_order = {"2160p": 0, "1080p": 1, "720p": 2, "480p": 3, "": 4}
+
+    filtered.sort(key=lambda r: (
+        source_type_order.get(r.source_type, 3),
+        compat_order.get(r.playback_compatibility, 3),
+        quality_order.get(r.quality, 4),
+        -(r.seeders or 0),
+        -(r.size_bytes or 0),
+    ))
+
+    return filtered

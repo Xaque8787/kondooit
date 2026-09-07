@@ -100,6 +100,7 @@ class SourceResult:
     stream_id: str | None = None
     is_season_pack: bool = False
     file_count: int = 0
+    playback_compatibility: str = "unknown"  # "direct_play", "remux", "transcode", "incompatible", "unknown"
     # Internal: upstream details for handle creation (not serialized to API)
     _upstream_url: str | None = None
     _upstream_auth: tuple[str, str] | None = None
