@@ -101,8 +101,8 @@ export function PlayerPage() {
         hlsRef.current = null;
       }
 
-      const video = videoRef.current;
-      if (!video) return;
+      const vid = videoRef.current;
+      if (!vid) return;
 
       const hlsUrl = `/api/hls/${streamId}/master.m3u8?${codecParams}`;
       const hls = new Hls({
@@ -119,22 +119,22 @@ export function PlayerPage() {
       hlsRef.current = hls;
 
       hls.loadSource(hlsUrl);
-      hls.attachMedia(video);
+      hls.attachMedia(vid);
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         setLoading(false);
         setIsSeeking(false);
-        video.play().catch(() => {});
+        vid.play().catch(() => {});
       });
 
-      attachErrorHandler(hls, hlsUrl, video);
+      attachErrorHandler(hls, hlsUrl, vid);
     } catch {
       setIsSeeking(false);
       setLoading(false);
     }
   }, [streamId, codecParams]);
 
-  function attachErrorHandler(hls: Hls, hlsUrl: string, video: HTMLVideoElement) {
+  function attachErrorHandler(hls: Hls, hlsUrl: string, _video: HTMLVideoElement) {
     let mediaErrorRecoveries = 0;
     hls.on(Hls.Events.ERROR, (_event, data) => {
       console.error("[HLS ERROR]", data.type, data.details, data.fatal, data.reason, data.response?.code);
@@ -164,9 +164,6 @@ export function PlayerPage() {
       return;
     }
 
-    const video = videoRef.current;
-    if (!video) return;
-
     let cancelled = false;
 
     async function init() {
@@ -189,6 +186,10 @@ export function PlayerPage() {
       }
 
       if (cancelled) return;
+
+      const video = videoRef.current;
+      if (!video) return;
+
       setLoadingMessage("Buffering...");
 
       const hlsUrl = `/api/hls/${streamId}/master.m3u8?${codecParams}`;
