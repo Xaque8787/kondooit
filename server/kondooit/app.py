@@ -18,7 +18,6 @@ from kondooit.api.auth import AuthController
 from kondooit.api.catalog import CatalogController
 from kondooit.api.discovery import DiscoveryController
 from kondooit.api.health import health
-from kondooit.api.playback import PlaybackController
 from kondooit.api.profiles import ProfileController
 from kondooit.api.providers import ProviderController
 from kondooit.api.source_providers import SourceProviderController
@@ -37,7 +36,6 @@ from kondooit.application.source_provider_service import (
     SourceProviderService,
 )
 from kondooit.application.stream_store import StreamHandleStore
-from kondooit.application.playback_queue import PlaybackQueue
 from kondooit.application.user_state_service import UserContentStateService
 from kondooit.application.watch_progress_service import WatchProgressService
 from kondooit.config import Settings, get_settings
@@ -124,7 +122,6 @@ def create_app(settings: Settings | None = None) -> Litestar:
     imdb_resolver = ImdbResolver(tmdb_provider, config_repo)
 
     stream_store = StreamHandleStore()
-    playback_queue = PlaybackQueue()
 
     source_provider_service = SourceProviderService(
         source_registry, source_config_repo,
@@ -215,11 +212,8 @@ def create_app(settings: Settings | None = None) -> Litestar:
     async def provide_watch_progress_service() -> AsyncIterator[WatchProgressService]:
         yield watch_progress_service
 
-    async def provide_playback_queue() -> AsyncIterator[PlaybackQueue]:
-        yield playback_queue
-
     return Litestar(
-        route_handlers=[health, AuthController, ProfileController, ProviderController, SourceProviderController, StreamController, CatalogController, DiscoveryController, UserStateController, WatchProgressController, PlaybackController],
+        route_handlers=[health, AuthController, ProfileController, ProviderController, SourceProviderController, StreamController, CatalogController, DiscoveryController, UserStateController, WatchProgressController],
         lifespan=[lifespan],
         dependencies={
             "session": provide_session,
@@ -233,7 +227,6 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "stream_store": provide_stream_store,
             "profile_service": provide_profile_service,
             "watch_progress_service": provide_watch_progress_service,
-            "playback_queue": provide_playback_queue,
         },
         debug=settings.debug,
     )
