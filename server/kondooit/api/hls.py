@@ -15,13 +15,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
 import shutil
 import tempfile
 import time
 from pathlib import Path
 
-from litestar import Controller, Request, get
+from litestar import Controller, get
 from litestar.exceptions import NotFoundException
 from litestar.response import Response
 
@@ -47,6 +46,7 @@ class HlsSession:
         self._started = False
         self._failed = False
         self._error_message = ""
+        self._stderr_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -59,7 +59,6 @@ class HlsSession:
         for k, v in self.handle.upstream_headers.items():
             input_headers += f"{k}: {v}\r\n"
 
-        auth_opts: list[str] = []
         if self.handle.upstream_auth:
             user, pw = self.handle.upstream_auth
             auth_url = self.handle.upstream_url
@@ -75,27 +74,32 @@ class HlsSession:
         cmd = [
             "ffmpeg",
             "-hide_banner",
-            "-loglevel", "warning",
+            "-loglevel", "info",
+            "-y",
         ]
 
         if input_headers:
             cmd.extend(["-headers", input_headers])
 
         cmd.extend([
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
             "-i", cmd_input,
             "-c", "copy",
-            "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
             "-f", "hls",
             "-hls_time", str(SEGMENT_DURATION),
             "-hls_list_size", "0",
-            "-hls_flags", "independent_segments+program_date_time",
+            "-hls_flags", "independent_segments",
             "-hls_segment_type", "fmp4",
             "-hls_fmp4_init_filename", init_segment.name,
             "-hls_segment_filename", str(segment_pattern),
             str(playlist_path),
         ])
 
-        logger.info("Starting HLS remux for stream %s", self.stream_id)
+        logger.info("Starting HLS remux for stream %s — cmd: %s", self.stream_id, " ".join(cmd[:6]) + " ... " + cmd[-1])
+        logger.info("Upstream URL (first 80 chars): %s", cmd_input[:80])
+
         try:
             self.process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -103,6 +107,7 @@ class HlsSession:
                 stderr=asyncio.subprocess.PIPE,
             )
             self._started = True
+            self._stderr_task = asyncio.create_task(self._read_stderr())
         except FileNotFoundError:
             self._failed = True
             self._error_message = "FFmpeg not found on the server"
@@ -111,6 +116,46 @@ class HlsSession:
             self._failed = True
             self._error_message = str(e)
             logger.error("Failed to start FFmpeg: %s", e)
+
+    async def _read_stderr(self) -> None:
+        """Read FFmpeg stderr continuously and log it; detect early exit."""
+        if not self.process or not self.process.stderr:
+            return
+        lines: list[str] = []
+        try:
+            while True:
+                line_bytes = await self.process.stderr.readline()
+                if not line_bytes:
+                    break
+                line = line_bytes.decode("utf-8", errors="replace").rstrip()
+                lines.append(line)
+                logger.info("FFmpeg [%s]: %s", self.stream_id[:12], line)
+        except Exception:
+            pass
+
+        returncode = await self.process.wait()
+        if returncode != 0:
+            self._failed = True
+            tail = "\n".join(lines[-10:]) if lines else "(no output)"
+            self._error_message = f"FFmpeg exited with code {returncode}: {tail}"
+            logger.error("FFmpeg failed for %s (exit %d): %s", self.stream_id, returncode, tail)
+
+    async def check_health(self) -> None:
+        """Check if FFmpeg has already exited with an error."""
+        if not self._started or self.process is None:
+            return
+        if self.process.returncode is not None and self.process.returncode != 0:
+            if not self._failed:
+                self._failed = True
+                stderr_bytes = b""
+                if self.process.stderr:
+                    try:
+                        stderr_bytes = await asyncio.wait_for(self.process.stderr.read(), timeout=1)
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                msg = stderr_bytes.decode("utf-8", errors="replace")[-500:] if stderr_bytes else "(no stderr)"
+                self._error_message = f"FFmpeg exited with code {self.process.returncode}: {msg}"
+                logger.error("FFmpeg died for stream %s: %s", self.stream_id, self._error_message)
 
     @property
     def is_running(self) -> bool:
@@ -129,6 +174,8 @@ class HlsSession:
                 await asyncio.wait_for(self.process.wait(), timeout=5)
             except asyncio.TimeoutError:
                 self.process.kill()
+        if self._stderr_task and not self._stderr_task.done():
+            self._stderr_task.cancel()
         if self.output_dir.exists():
             shutil.rmtree(self.output_dir, ignore_errors=True)
 
@@ -203,11 +250,25 @@ class HlsController(Controller):
 
         playlist_path = session.output_dir / "stream.m3u8"
         retries = 0
-        while not playlist_path.exists() and retries < 50:
-            await asyncio.sleep(0.2)
+        while not playlist_path.exists() and retries < 100:
+            await session.check_health()
+            if session.failed:
+                return Response(
+                    content=f"HLS remux failed: {session._error_message}",
+                    status_code=500,
+                    media_type="text/plain",
+                )
+            await asyncio.sleep(0.3)
             retries += 1
 
         if not playlist_path.exists():
+            await session.check_health()
+            if session.failed:
+                return Response(
+                    content=f"HLS remux failed: {session._error_message}",
+                    status_code=500,
+                    media_type="text/plain",
+                )
             return Response(
                 content="Playlist not yet available — FFmpeg is still starting",
                 status_code=503,
