@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useEffect, useState, useCallback } from "react";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import type { MovieDetail, UserContentState, WatchProgressResponse } from "../types";
 import {
@@ -14,6 +14,7 @@ import { SourceSearchPanel } from "../components/SourceSearchPanel";
 
 export function MovieDetailPage() {
   const { provider, id } = useParams<{ provider: string; id: string }>();
+  const navigate = useNavigate();
   const [movie, setMovie] = useState<MovieDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -21,6 +22,34 @@ export function MovieDetailPage() {
   const [watchProgress, setWatchProgress] = useState<WatchProgressResponse | null>(null);
   const [toggling, setToggling] = useState(false);
   const [watchToggling, setWatchToggling] = useState(false);
+  const [autoPlaying, setAutoPlaying] = useState(false);
+  const [autoPlayError, setAutoPlayError] = useState("");
+
+  const handleAutoPlay = useCallback(async () => {
+    if (!movie || !provider || !id || autoPlaying) return;
+    setAutoPlaying(true);
+    setAutoPlayError("");
+    try {
+      const year = movie.release_date ? parseInt(movie.release_date.substring(0, 4), 10) : undefined;
+      const res = await api.autoPlay(movie.title, year, undefined, undefined, movie.external_id, "movie");
+      if (res.success && res.stream_id) {
+        const p = new URLSearchParams({
+          stream: res.stream_id,
+          title: movie.title,
+          type: "movie",
+        });
+        if (provider) p.set("provider", provider);
+        if (movie.external_id) p.set("eid", String(movie.external_id));
+        navigate(`/player?${p.toString()}`);
+      } else {
+        setAutoPlayError(res.detail || "No playable source found");
+      }
+    } catch (err) {
+      setAutoPlayError(err instanceof Error ? err.message : "Auto-play failed");
+    } finally {
+      setAutoPlaying(false);
+    }
+  }, [movie, provider, id, autoPlaying, navigate]);
 
   useEffect(() => {
     if (!provider || !id) return;
@@ -117,7 +146,33 @@ export function MovieDetailPage() {
               <Rating value={movie.vote_average} />
             </div>
 
+            {autoPlayError && (
+              <p className="text-sm text-red-400 mb-2">{autoPlayError}</p>
+            )}
+
             <div className="flex items-center gap-3 mb-4">
+              <button
+                onClick={handleAutoPlay}
+                disabled={autoPlaying}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-60"
+              >
+                {autoPlaying ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Finding best source...
+                  </>
+                ) : (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                      <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+                    </svg>
+                    Play
+                  </>
+                )}
+              </button>
               <button
                 onClick={handleToggleFavorite}
                 disabled={toggling}

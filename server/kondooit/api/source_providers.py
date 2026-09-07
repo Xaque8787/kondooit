@@ -92,6 +92,22 @@ class AddTorrentResponse(BaseModel):
     detail: str
 
 
+class AutoPlayRequestBody(BaseModel):
+    title: str
+    year: int | None = None
+    season: int | None = None
+    episode: int | None = None
+    tmdb_id: int | None = None
+    content_type: str = "movie"
+
+
+class AutoPlayResponse(BaseModel):
+    success: bool
+    detail: str
+    stream_id: str | None = None
+    source: SourceResultResponse | None = None
+
+
 class SourceResultResponse(BaseModel):
     provider_key: str
     filename: str
@@ -317,6 +333,89 @@ class SourceProviderController(Controller):
         if not username or not password:
             return None
         return (username, password)
+
+    @post("/auto-play")
+    async def auto_play(
+        self,
+        request: Request,
+        data: AutoPlayRequestBody,
+        session: AsyncSession,
+        source_provider_service: SourceProviderService,
+        profile_service: ProfileService,
+        stream_store: StreamHandleStore,
+    ) -> AutoPlayResponse:
+        query = SourceSearchRequest(
+            title=data.title,
+            year=data.year,
+            season=data.season,
+            episode=data.episode,
+            tmdb_id=data.tmdb_id,
+            content_type=data.content_type,
+        )
+        results = await source_provider_service.search_sources(session, query)
+
+        profile = await _get_active_profile(request, session, profile_service)
+        if profile:
+            results = _apply_profile_preferences(results, profile)
+
+        easynews_auth = await self._get_easynews_auth(session, source_provider_service)
+
+        instant_types = {"direct", "cached_torrent", "in_library"}
+        candidates = [r for r in results if r.source_type in instant_types]
+        if not candidates:
+            return AutoPlayResponse(success=False, detail="No playable sources found")
+
+        for r in candidates:
+            stream_id = None
+            if r._upstream_url and easynews_auth:
+                stream_id = stream_store.create(
+                    provider_key=r.provider_key,
+                    upstream_url=r._upstream_url,
+                    upstream_auth=easynews_auth,
+                    filename=r.filename,
+                    content_type=r._content_type or "video/mp4",
+                )
+            elif r.stream_url and r.stream_url.startswith("http"):
+                stream_id = stream_store.create(
+                    provider_key=r.provider_key,
+                    upstream_url=r.stream_url,
+                    filename=r.filename,
+                    content_type="video/mp4",
+                )
+            elif r.info_hash:
+                resolve_result = await source_provider_service.resolve_stream(
+                    session, r.provider_key, r.info_hash, None,
+                    season=data.season, episode=data.episode,
+                )
+                raw_url = resolve_result.get("stream_url")
+                if resolve_result.get("success") and raw_url:
+                    stream_id = stream_store.create(
+                        provider_key=r.provider_key,
+                        upstream_url=raw_url,
+                        filename=r.filename,
+                        content_type="video/mp4",
+                    )
+
+            if stream_id:
+                source_resp = SourceResultResponse(
+                    provider_key=r.provider_key,
+                    filename=r.filename,
+                    size_bytes=r.size_bytes,
+                    quality=r.quality,
+                    codec=r.codec,
+                    duration_seconds=r.duration_seconds,
+                    info_hash=r.info_hash,
+                    seeders=r.seeders,
+                    source_type=r.source_type,
+                    scraper_source=r.scraper_source,
+                    stream_id=stream_id,
+                    is_season_pack=r.is_season_pack,
+                    file_count=r.file_count,
+                    playback_compatibility=r.playback_compatibility,
+                )
+                return AutoPlayResponse(success=True, detail="ok", stream_id=stream_id, source=source_resp)
+
+        return AutoPlayResponse(success=False, detail="Could not resolve any playable source")
 
     @post("/add-torrent")
     async def add_torrent(

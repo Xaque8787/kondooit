@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useEffect, useState, useCallback } from "react";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import type { SeasonDetail, WatchProgressResponse } from "../types";
 import { LoadingSpinner, ErrorState, Rating } from "../components/ui";
@@ -12,12 +12,15 @@ export function EpisodeDetailPage() {
     season: string;
     episode: string;
   }>();
+  const navigate = useNavigate();
   const [seasonData, setSeasonData] = useState<SeasonDetail | null>(null);
   const [seriesTitle, setSeriesTitle] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [watchProgress, setWatchProgress] = useState<WatchProgressResponse | null>(null);
   const [watchToggling, setWatchToggling] = useState(false);
+  const [autoPlaying, setAutoPlaying] = useState(false);
+  const [autoPlayError, setAutoPlayError] = useState("");
 
   const seasonNum = parseInt(season || "0", 10);
   const episodeNum = parseInt(episode || "0", 10);
@@ -48,6 +51,34 @@ export function EpisodeDetailPage() {
       .then(setWatchProgress)
       .catch(() => setWatchProgress(null));
   }, [provider, seriesId, season, episode, seasonData, episodeNum]);
+
+  const handleAutoPlay = useCallback(async (epData: { season_number: number; episode_number: number; external_id: number }) => {
+    if (!seriesTitle || !provider || autoPlaying) return;
+    setAutoPlaying(true);
+    setAutoPlayError("");
+    try {
+      const res = await api.autoPlay(seriesTitle, undefined, epData.season_number, epData.episode_number, seriesIdNum, "episode");
+      if (res.success && res.stream_id) {
+        const p = new URLSearchParams({
+          stream: res.stream_id,
+          title: seriesTitle,
+          type: "episode",
+        });
+        if (provider) p.set("provider", provider);
+        if (epData.external_id) p.set("eid", String(epData.external_id));
+        p.set("series_eid", String(seriesIdNum));
+        p.set("season", String(epData.season_number));
+        p.set("episode", String(epData.episode_number));
+        navigate(`/player?${p.toString()}`);
+      } else {
+        setAutoPlayError(res.detail || "No playable source found");
+      }
+    } catch (err) {
+      setAutoPlayError(err instanceof Error ? err.message : "Auto-play failed");
+    } finally {
+      setAutoPlaying(false);
+    }
+  }, [seriesTitle, provider, autoPlaying, seriesIdNum, navigate]);
 
   if (loading) return <LoadingSpinner label="Loading episode" />;
   if (error) return <ErrorState message={error} />;
@@ -117,7 +148,33 @@ export function EpisodeDetailPage() {
             {ep.overview || "No overview available for this episode."}
           </p>
 
+          {autoPlayError && (
+            <p className="text-sm text-red-400 mt-3">{autoPlayError}</p>
+          )}
+
           <div className="flex items-center gap-3 mt-4 mb-2">
+            <button
+              onClick={() => handleAutoPlay({ season_number: ep.season_number, episode_number: ep.episode_number, external_id: ep.external_id })}
+              disabled={autoPlaying}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-60"
+            >
+              {autoPlaying ? (
+                <>
+                  <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Finding best source...
+                </>
+              ) : (
+                <>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                    <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+                  </svg>
+                  Play
+                </>
+              )}
+            </button>
             <button
               onClick={async () => {
                 if (!provider || watchToggling) return;

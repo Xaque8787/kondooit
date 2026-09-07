@@ -220,6 +220,19 @@ export const api = {
       }),
     }),
 
+  autoPlay: (title: string, year?: number, season?: number, episode?: number, tmdb_id?: number, content_type?: string) =>
+    request<{ success: boolean; detail: string; stream_id: string | null; source: SourceResult | null }>("/source-providers/auto-play", {
+      method: "POST",
+      body: JSON.stringify({
+        title,
+        year: year ?? null,
+        season: season ?? null,
+        episode: episode ?? null,
+        tmdb_id: tmdb_id ?? null,
+        content_type: content_type ?? "movie",
+      }),
+    }),
+
   addTorrent: (info_hash: string, provider_key: string = "torbox") =>
     request<{ success: boolean; detail: string }>("/source-providers/add-torrent", {
       method: "POST",
