@@ -17,22 +17,30 @@ class ProfileResponse(BaseModel):
     display_name: str
     avatar_color: str
     is_admin: bool
-    preferred_quality: str
-    allow_server_processing: bool
+    max_resolution: int
+    allow_direct_play: bool
+    allow_remux: bool
+    allow_transcode: bool
+    auto_play: bool
+    client_video_codecs: str
+    client_audio_codecs: str
 
 
 class CreateProfileRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=100)
     avatar_color: str = Field(default="#3B82F6", max_length=20)
-    preferred_quality: str = Field(default="1080p", max_length=20)
-    allow_server_processing: bool = True
 
 
 class UpdateProfileRequest(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=100)
     avatar_color: str | None = Field(default=None, max_length=20)
-    preferred_quality: str | None = Field(default=None, max_length=20)
-    allow_server_processing: bool | None = None
+    max_resolution: int | None = None
+    allow_direct_play: bool | None = None
+    allow_remux: bool | None = None
+    allow_transcode: bool | None = None
+    auto_play: bool | None = None
+    client_video_codecs: str | None = None
+    client_audio_codecs: str | None = None
 
 
 class ProfileController(Controller):
@@ -72,8 +80,6 @@ class ProfileController(Controller):
                 user_id=current_user["id"],
                 display_name=data.display_name,
                 avatar_color=data.avatar_color,
-                preferred_quality=data.preferred_quality,
-                allow_server_processing=data.allow_server_processing,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -117,8 +123,13 @@ class ProfileController(Controller):
             user_id=current_user["id"],
             display_name=data.display_name,
             avatar_color=data.avatar_color,
-            preferred_quality=data.preferred_quality,
-            allow_server_processing=data.allow_server_processing,
+            max_resolution=data.max_resolution,
+            allow_direct_play=data.allow_direct_play,
+            allow_remux=data.allow_remux,
+            allow_transcode=data.allow_transcode,
+            auto_play=data.auto_play,
+            client_video_codecs=data.client_video_codecs,
+            client_audio_codecs=data.client_audio_codecs,
         )
         if profile is None:
             raise HTTPException(status_code=404, detail="Profile not found")
@@ -153,6 +164,11 @@ def _to_response(p) -> ProfileResponse:
         display_name=p.display_name,
         avatar_color=p.avatar_color,
         is_admin=p.is_admin,
-        preferred_quality=p.preferred_quality,
-        allow_server_processing=p.allow_server_processing,
+        max_resolution=p.max_resolution,
+        allow_direct_play=p.allow_direct_play,
+        allow_remux=p.allow_remux,
+        allow_transcode=p.allow_transcode,
+        auto_play=p.auto_play,
+        client_video_codecs=p.client_video_codecs,
+        client_audio_codecs=p.client_audio_codecs,
     )

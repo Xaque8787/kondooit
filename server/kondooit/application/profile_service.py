@@ -32,8 +32,6 @@ class ProfileService:
         user_id: UUID,
         display_name: str,
         avatar_color: str = "#3B82F6",
-        preferred_quality: str = "1080p",
-        allow_server_processing: bool = True,
     ) -> Profile:
         existing = await self._repo.list_by_user(session, user_id)
         if len(existing) >= MAX_PROFILES_PER_USER:
@@ -45,8 +43,6 @@ class ProfileService:
             display_name=display_name.strip(),
             avatar_color=avatar_color,
             is_admin=False,
-            preferred_quality=preferred_quality,
-            allow_server_processing=allow_server_processing,
         )
         saved = await self._repo.create(session, profile)
         await session.commit()
@@ -59,8 +55,13 @@ class ProfileService:
         user_id: UUID,
         display_name: str | None = None,
         avatar_color: str | None = None,
-        preferred_quality: str | None = None,
-        allow_server_processing: bool | None = None,
+        max_resolution: int | None = None,
+        allow_direct_play: bool | None = None,
+        allow_remux: bool | None = None,
+        allow_transcode: bool | None = None,
+        auto_play: bool | None = None,
+        client_video_codecs: str | None = None,
+        client_audio_codecs: str | None = None,
     ) -> Profile | None:
         profile = await self._repo.get_by_id(session, profile_id)
         if profile is None or profile.user_id != user_id:
@@ -71,10 +72,20 @@ class ProfileService:
             updates["display_name"] = display_name.strip()
         if avatar_color is not None:
             updates["avatar_color"] = avatar_color
-        if preferred_quality is not None:
-            updates["preferred_quality"] = preferred_quality
-        if allow_server_processing is not None:
-            updates["allow_server_processing"] = allow_server_processing
+        if max_resolution is not None:
+            updates["max_resolution"] = max_resolution
+        if allow_direct_play is not None:
+            updates["allow_direct_play"] = allow_direct_play
+        if allow_remux is not None:
+            updates["allow_remux"] = allow_remux
+        if allow_transcode is not None:
+            updates["allow_transcode"] = allow_transcode
+        if auto_play is not None:
+            updates["auto_play"] = auto_play
+        if client_video_codecs is not None:
+            updates["client_video_codecs"] = client_video_codecs
+        if client_audio_codecs is not None:
+            updates["client_audio_codecs"] = client_audio_codecs
 
         if not updates:
             return profile
@@ -108,8 +119,6 @@ class ProfileService:
             display_name=username,
             avatar_color="#3B82F6",
             is_admin=True,
-            preferred_quality="1080p",
-            allow_server_processing=True,
         )
         saved = await self._repo.create(session, profile)
         await session.commit()

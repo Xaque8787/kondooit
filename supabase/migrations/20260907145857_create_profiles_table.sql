@@ -43,6 +43,13 @@ CREATE TABLE IF NOT EXISTS profiles (
     is_admin boolean NOT NULL DEFAULT false,
     preferred_quality text NOT NULL DEFAULT '1080p',
     allow_server_processing boolean NOT NULL DEFAULT true,
+    max_resolution integer NOT NULL DEFAULT 2160,
+    allow_direct_play boolean NOT NULL DEFAULT true,
+    allow_remux boolean NOT NULL DEFAULT true,
+    allow_transcode boolean NOT NULL DEFAULT false,
+    auto_play boolean NOT NULL DEFAULT false,
+    client_video_codecs text NOT NULL DEFAULT '',
+    client_audio_codecs text NOT NULL DEFAULT '',
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );

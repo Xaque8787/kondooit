@@ -19,7 +19,12 @@ class Profile:
     display_name: str
     avatar_color: str = "#3B82F6"
     is_admin: bool = False
-    preferred_quality: str = "1080p"
-    allow_server_processing: bool = True
+    max_resolution: int = 2160
+    allow_direct_play: bool = True
+    allow_remux: bool = True
+    allow_transcode: bool = False
+    auto_play: bool = False
+    client_video_codecs: str = ""
+    client_audio_codecs: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None

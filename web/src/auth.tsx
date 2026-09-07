@@ -8,6 +8,7 @@ import {
 } from "react";
 import type { User, ProfileBrief } from "./types";
 import { api } from "./api";
+import { detectCodecs } from "./codecs";
 
 interface AuthContextValue {
   user: User | null;
@@ -91,6 +92,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const selectProfile = (profile: ProfileBrief) => {
     setActiveProfile(profile);
     localStorage.setItem("kondooit_profile", JSON.stringify(profile));
+    const codecs = detectCodecs();
+    api.updateProfile(profile.id, {
+      client_video_codecs: codecs.video.join(","),
+      client_audio_codecs: codecs.audio.join(","),
+    }).catch(() => {});
   };
 
   const clearProfile = () => {

@@ -262,8 +262,13 @@ export interface Profile {
   display_name: string;
   avatar_color: string;
   is_admin: boolean;
-  preferred_quality: string;
-  allow_server_processing: boolean;
+  max_resolution: number;
+  allow_direct_play: boolean;
+  allow_remux: boolean;
+  allow_transcode: boolean;
+  auto_play: boolean;
+  client_video_codecs: string;
+  client_audio_codecs: string;
 }
 
 export interface LoginResponse {

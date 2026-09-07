@@ -258,19 +258,25 @@ export const api = {
   createProfile: (data: {
     display_name: string;
     avatar_color?: string;
-    preferred_quality?: string;
-    allow_server_processing?: boolean;
   }) =>
     request<import("./types").Profile>("/profiles/", {
       method: "POST",
       body: JSON.stringify(data),
     }),
 
+  getProfile: (profileId: string) =>
+    request<import("./types").Profile>(`/profiles/${profileId}`),
+
   updateProfile: (profileId: string, data: {
     display_name?: string;
     avatar_color?: string;
-    preferred_quality?: string;
-    allow_server_processing?: boolean;
+    max_resolution?: number;
+    allow_direct_play?: boolean;
+    allow_remux?: boolean;
+    allow_transcode?: boolean;
+    auto_play?: boolean;
+    client_video_codecs?: string;
+    client_audio_codecs?: string;
   }) =>
     request<import("./types").Profile>(`/profiles/${profileId}`, {
       method: "PUT",
