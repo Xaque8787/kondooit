@@ -1,9 +1,9 @@
 # ADR-0013: Transport-agnostic stream handles replace client-constructed URLs
 
-- **Status:** Accepted
+- **Status:** Superseded
 - **Date:** 2026-09-03
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:** ADR-0015
 - **Resolves:** "How should stream references be communicated between server and clients across different transports?"
 
 ## Context

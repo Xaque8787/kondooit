@@ -1,9 +1,9 @@
 # ADR-0006: Playback orchestration is core; stream transport is a core subsystem
 
-- **Status:** Accepted
+- **Status:** Superseded
 - **Date:** 2026-08-17
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:** ADR-0014
 - **Resolves:** "How should playback capabilities be represented?", "How should remote streams be proxied?", "How should transcoding fit into the architecture?"
 
 ## Context
