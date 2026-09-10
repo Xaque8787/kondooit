@@ -16,6 +16,9 @@ interface StreamInfo {
   decision?: string;
   transcoded_seconds?: number;
   is_running?: boolean;
+  probe_failed?: boolean;
+  error?: string;
+  failed?: boolean;
 }
 
 function formatTime(s: number): string {
@@ -264,6 +267,15 @@ export function PlayerPage() {
         if (infoResp.ok) {
           const info: StreamInfo = await infoResp.json();
           setStreamInfo(info);
+          if (info.probe_failed || info.failed) {
+            if (autoPlaySession) {
+              tryNextAutoPlaySource();
+              return;
+            }
+            setError(info.error || "Could not reach the source — the link may have expired. Please go back and try a different one.");
+            setLoading(false);
+            return;
+          }
           if (info.decision) {
             const isRemux = info.decision.startsWith("remux");
             setLoadingMessage(isRemux ? "Starting stream..." : "Transcoding stream...");

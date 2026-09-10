@@ -232,9 +232,10 @@ def _build_input_url(handle: StreamHandle) -> str:
 
 
 def _build_auth_headers(handle: StreamHandle) -> str:
-    """Build FFmpeg -headers string including auth if present."""
+    """Build FFmpeg -headers string including auth and User-Agent."""
     import base64
     parts: list[str] = []
+    parts.append("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n")
     if handle.upstream_auth:
         user, pw = handle.upstream_auth
         token = base64.b64encode(f"{user}:{pw}".encode()).decode()
@@ -467,9 +468,16 @@ class HlsSessionManager:
         probe = self._probes.get(stream_id)
         if probe is None:
             input_url = _build_input_url(handle)
-            probe = await ffprobe_url(input_url, _build_auth_headers(handle))
+            auth_headers = _build_auth_headers(handle)
+            probe = await ffprobe_url(input_url, auth_headers)
             if probe:
                 self._probes[stream_id] = probe
+
+        # If probe returned empty codecs, the upstream URL is unreachable
+        if probe and not probe.video_codec and not probe.audio_codec:
+            logger.error("Probe returned no codecs for %s — upstream URL likely unreachable", stream_id)
+            self._failure_counts[stream_id] = MAX_STREAM_FAILURES
+            return None
 
         session_hash = hashlib.sha256(stream_id.encode()).hexdigest()[:12]
         output_dir = HLS_SEGMENT_DIR / session_hash
@@ -566,6 +574,14 @@ class HlsController(Controller):
         if handle is None:
             raise NotFoundException("Stream not found or expired")
 
+        # Check permanent failure first
+        if hls_manager.is_permanently_failed(stream_id):
+            return Response(
+                content={"stream_id": stream_id, "failed": True, "error": "Stream source is unreachable"},
+                status_code=200,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+
         # Probe if not already cached
         probe = hls_manager.get_probe(stream_id)
         if probe is None:
@@ -573,6 +589,9 @@ class HlsController(Controller):
             probe = await ffprobe_url(input_url, _build_auth_headers(handle))
             if probe:
                 hls_manager._probes[stream_id] = probe
+
+        # Detect unreachable upstream
+        probe_failed = probe is None or (not probe.video_codec and not probe.audio_codec)
 
         session = hls_manager.get(stream_id)
 
@@ -583,7 +602,10 @@ class HlsController(Controller):
             "audio_codec": probe.audio_codec if probe else "",
             "width": probe.width if probe else 0,
             "height": probe.height if probe else 0,
+            "probe_failed": probe_failed,
         }
+        if probe_failed:
+            info["error"] = "Could not reach the source — the link may have expired"
         if session:
             info["decision"] = session._decision_reason
             info["transcoded_seconds"] = session.max_seekable_seconds()
