@@ -327,6 +327,7 @@ class HlsSession:
         start_number = int(seek_seconds / SEGMENT_DURATION) if seek_seconds > 0 else 0
 
         cmd.extend([
+            "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
             "-f", "hls",
             "-hls_time", str(SEGMENT_DURATION),
             "-hls_list_size", "0",
@@ -399,9 +400,15 @@ class HlsSession:
         return self._failed
 
     def segment_count(self) -> int:
-        if not self.output_dir.exists():
+        """Count segments listed in the playlist (guaranteed complete by FFmpeg)."""
+        playlist = self.output_dir / "stream.m3u8"
+        if not playlist.exists():
             return 0
-        return len(list(self.output_dir.glob("seg_*.m4s")))
+        try:
+            text = playlist.read_text()
+            return text.count("#EXTINF:")
+        except OSError:
+            return 0
 
     def max_seekable_seconds(self) -> float:
         """Approximate furthest point we have segments for."""
@@ -558,6 +565,16 @@ def _parse_codec_set(raw: str | None) -> set[str] | None:
 
 class HlsController(Controller):
     path = "/hls"
+
+    @staticmethod
+    def _segment_in_playlist(session: HlsSession, segment_name: str) -> bool:
+        playlist = session.output_dir / "stream.m3u8"
+        if not playlist.exists():
+            return False
+        try:
+            return segment_name in playlist.read_text()
+        except OSError:
+            return False
 
     @get("/{stream_id:str}/info")
     async def get_info(
@@ -762,7 +779,10 @@ class HlsController(Controller):
         segment_path = session.output_dir / safe_name
 
         retries = 0
-        while not segment_path.exists() and retries < 25:
+        while retries < 50:
+            if segment_path.exists() and segment_path.stat().st_size > 0:
+                if safe_name == "init.mp4" or self._segment_in_playlist(session, safe_name):
+                    break
             await asyncio.sleep(0.2)
             retries += 1
 
@@ -770,6 +790,8 @@ class HlsController(Controller):
             raise NotFoundException(f"Segment {safe_name} not found")
 
         content = segment_path.read_bytes()
+        if len(content) == 0:
+            raise NotFoundException(f"Segment {safe_name} is empty")
 
         if safe_name.endswith(".ts"):
             media_type = "video/mp2t"
