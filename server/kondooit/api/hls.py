@@ -658,6 +658,7 @@ class HlsController(Controller):
                 content=f"HLS failed: {session._error_message}",
                 status_code=500,
                 media_type="text/plain",
+                headers={"Access-Control-Allow-Origin": "*"},
             )
 
         playlist_path = session.output_dir / "stream.m3u8"
@@ -669,6 +670,7 @@ class HlsController(Controller):
                     content=f"HLS failed: {session._error_message}",
                     status_code=500,
                     media_type="text/plain",
+                    headers={"Access-Control-Allow-Origin": "*"},
                 )
             if playlist_path.exists() and session.segment_count() >= MIN_SEGMENTS_BEFORE_SERVE:
                 break
@@ -682,7 +684,7 @@ class HlsController(Controller):
                 content="Playlist not ready yet",
                 status_code=503,
                 media_type="text/plain",
-                headers={"Retry-After": "2"},
+                headers={"Retry-After": "2", "Access-Control-Allow-Origin": "*"},
             )
 
         content = playlist_path.read_text()

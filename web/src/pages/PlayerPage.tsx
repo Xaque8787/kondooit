@@ -148,11 +148,12 @@ export function PlayerPage() {
       maxBufferLength: 30,
       maxMaxBufferLength: 120,
       startLevel: -1,
-      startPosition: 0,
-      liveSyncDuration: 0,
-      liveMaxLatencyDuration: Infinity,
       manifestLoadingRetryDelay: 2000,
       manifestLoadingMaxRetry: 5,
+      levelLoadingRetryDelay: 2000,
+      levelLoadingMaxRetry: 6,
+      fragLoadingRetryDelay: 1000,
+      fragLoadingMaxRetry: 6,
       debug: false,
     });
     hlsRef.current = hls;
@@ -170,43 +171,42 @@ export function PlayerPage() {
     const MAX_NETWORK_RETRIES = 5;
     hls.on(Hls.Events.ERROR, (_event, data) => {
       console.error("[HLS ERROR]", data.type, data.details, data.fatal, data.reason, data.response?.code);
-      if (data.fatal) {
-        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaErrorRecoveries < 3) {
-          mediaErrorRecoveries++;
-          hls.recoverMediaError();
-        } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 410) {
-          hls.destroy();
-          if (autoPlaySession) {
-            tryNextAutoPlaySource();
-          } else {
-            setError("This source is not available. Please go back and try a different one.");
-            setLoading(false);
-          }
-        } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 503 && networkRetries < MAX_NETWORK_RETRIES) {
-          networkRetries++;
-          setTimeout(() => hls.loadSource(hlsUrl), 2000);
-        } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 500 && networkRetries < MAX_NETWORK_RETRIES) {
-          networkRetries++;
-          setTimeout(() => hls.loadSource(hlsUrl), 3000);
+      if (!data.fatal) return;
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaErrorRecoveries < 3) {
+        mediaErrorRecoveries++;
+        hls.recoverMediaError();
+      } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 410) {
+        hls.destroy();
+        if (autoPlaySession) {
+          tryNextAutoPlaySource();
         } else {
-          hls.destroy();
-          if (autoPlaySession && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            tryNextAutoPlaySource();
-          } else {
-            const detail = data.reason || data.details || data.type;
-            setError(
-              data.type === Hls.ErrorTypes.NETWORK_ERROR
-                ? `Stream failed: ${detail}`
-                : `Playback failed: ${detail}`
-            );
-            setLoading(false);
-          }
+          setError("This source is not available. Please go back and try a different one.");
+          setLoading(false);
+        }
+      } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 503 && networkRetries < MAX_NETWORK_RETRIES) {
+        networkRetries++;
+        setTimeout(() => hls.loadSource(hlsUrl), 2000);
+      } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR && data.response?.code === 500 && networkRetries < MAX_NETWORK_RETRIES) {
+        networkRetries++;
+        setTimeout(() => hls.loadSource(hlsUrl), 3000);
+      } else {
+        hls.destroy();
+        if (autoPlaySession && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          tryNextAutoPlaySource();
+        } else {
+          const detail = data.reason || data.details || data.type;
+          setError(
+            data.type === Hls.ErrorTypes.NETWORK_ERROR
+              ? `Stream failed: ${detail}`
+              : `Playback failed: ${detail}`
+          );
+          setLoading(false);
         }
       }
     });
 
     return hls;
-  }, []);
+  }, [autoPlaySession, tryNextAutoPlaySource]);
 
   const serverSeek = useCallback(async (targetTime: number) => {
     if (!streamId) return;
