@@ -283,7 +283,7 @@ class HlsSession:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         playlist_path = self.output_dir / "stream.m3u8"
-        segment_pattern = self.output_dir / "seg_%05d.ts"
+        segment_pattern = self.output_dir / "seg_%05d.m4s"
 
         input_headers = _build_auth_headers(self.handle)
         cmd_input = _build_input_url(self.handle)
@@ -332,7 +332,8 @@ class HlsSession:
             "-hls_list_size", "0",
             "-hls_playlist_type", "event",
             "-hls_flags", "independent_segments+append_list",
-            "-hls_segment_type", "mpegts",
+            "-hls_segment_type", "fmp4",
+            "-hls_fmp4_init_filename", "init.mp4",
             "-start_number", str(start_number),
             "-hls_segment_filename", str(segment_pattern),
             str(playlist_path),
@@ -400,7 +401,7 @@ class HlsSession:
     def segment_count(self) -> int:
         if not self.output_dir.exists():
             return 0
-        return len(list(self.output_dir.glob("seg_*.ts")))
+        return len(list(self.output_dir.glob("seg_*.m4s")))
 
     def max_seekable_seconds(self) -> float:
         """Approximate furthest point we have segments for."""
