@@ -147,6 +147,7 @@ export function PlayerPage() {
     const hls = new Hls({
       maxBufferLength: 30,
       maxMaxBufferLength: 120,
+      maxBufferHole: 0.5,
       startLevel: -1,
       manifestLoadingRetryDelay: 2000,
       manifestLoadingMaxRetry: 5,

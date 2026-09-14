@@ -299,7 +299,7 @@ class HlsSession:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         playlist_path = self.output_dir / "stream.m3u8"
-        segment_pattern = self.output_dir / "seg_%05d.ts"
+        segment_pattern = self.output_dir / "seg_%05d.m4s"
 
         input_headers = _build_auth_headers(self.handle)
         cmd_input = _build_input_url(self.handle)
@@ -344,12 +344,14 @@ class HlsSession:
 
         cmd.extend(["-max_muxing_queue_size", "4096"])
         cmd.extend([
+            "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
             "-f", "hls",
             "-hls_time", str(SEGMENT_DURATION),
             "-hls_list_size", "0",
             "-hls_playlist_type", "event",
             "-hls_flags", "independent_segments+append_list",
-            "-hls_segment_type", "mpegts",
+            "-hls_segment_type", "fmp4",
+            "-hls_fmp4_init_filename", "init.mp4",
             "-start_number", str(start_number),
             "-hls_segment_filename", str(segment_pattern),
             str(playlist_path),
@@ -796,7 +798,7 @@ class HlsController(Controller):
         retries = 0
         while retries < 50:
             if segment_path.exists() and segment_path.stat().st_size > 0:
-                if self._segment_in_playlist(session, safe_name):
+                if safe_name == "init.mp4" or self._segment_in_playlist(session, safe_name):
                     break
             await asyncio.sleep(0.2)
             retries += 1
@@ -808,7 +810,10 @@ class HlsController(Controller):
         if len(content) == 0:
             raise NotFoundException(f"Segment {safe_name} is empty")
 
-        media_type = "video/mp2t"
+        if safe_name.endswith(".ts"):
+            media_type = "video/mp2t"
+        else:
+            media_type = "video/mp4"
 
         return Response(
             content=content,
