@@ -39,7 +39,7 @@ STALE_SESSION_SECONDS = 3600
 MIN_SEGMENTS_BEFORE_SERVE = 2
 
 # Codecs browsers can natively decode in MPEG-TS via hls.js / MSE
-BROWSER_VIDEO_CODECS = {"h264", "avc", "avc1"}
+BROWSER_VIDEO_CODECS = {"h264", "avc", "avc1", "av1", "vp9"}
 BROWSER_AUDIO_CODECS = {"aac", "mp3", "mp4a", "opus"}
 
 
@@ -210,7 +210,7 @@ def decide_codecs(
         return ["-c:v", "copy"], ["-c:a", "copy"], reason
     elif can_copy_video:
         reason = f"remux video (copy {vc}), transcode audio ({ac}->aac)"
-        return ["-c:v", "copy"], ["-c:a", "aac", "-b:a", "192k"], reason
+        return ["-c:v", "copy"], ["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000"], reason
     elif can_copy_audio:
         reason = f"transcode video ({vc}->h264), copy audio ({ac})"
         return (
@@ -222,7 +222,7 @@ def decide_codecs(
         reason = f"full transcode ({vc}->h264, {ac}->aac)"
         return (
             ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22"],
-            ["-c:a", "aac", "-b:a", "192k"],
+            ["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000"],
             reason,
         )
 
@@ -311,7 +311,7 @@ class HlsSession:
             )
         else:
             video_flags = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22"]
-            audio_flags = ["-c:a", "aac", "-b:a", "192k"]
+            audio_flags = ["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000"]
             reason = "full transcode (no probe data)"
 
         self._decision_reason = reason
@@ -330,7 +330,6 @@ class HlsSession:
         if seek_seconds > 0:
             cmd.extend(["-ss", f"{seek_seconds:.3f}"])
 
-        cmd.extend(["-fflags", "+genpts+discardcorrupt"])
         cmd.extend(["-i", cmd_input, "-map", "0:v:0"])
         if audio_flags:
             cmd.extend(["-map", "0:a:0"])
@@ -343,6 +342,7 @@ class HlsSession:
 
         start_number = int(seek_seconds / SEGMENT_DURATION) if seek_seconds > 0 else 0
 
+        cmd.extend(["-max_muxing_queue_size", "4096"])
         cmd.extend([
             "-f", "hls",
             "-hls_time", str(SEGMENT_DURATION),
