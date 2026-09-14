@@ -299,7 +299,7 @@ class HlsSession:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         playlist_path = self.output_dir / "stream.m3u8"
-        segment_pattern = self.output_dir / "seg_%05d.m4s"
+        segment_pattern = self.output_dir / "seg_%05d.ts"
 
         input_headers = _build_auth_headers(self.handle)
         cmd_input = _build_input_url(self.handle)
@@ -349,8 +349,7 @@ class HlsSession:
             "-hls_list_size", "0",
             "-hls_playlist_type", "event",
             "-hls_flags", "independent_segments+append_list",
-            "-hls_segment_type", "fmp4",
-            "-hls_fmp4_init_filename", "init.mp4",
+            "-hls_segment_type", "mpegts",
             "-start_number", str(start_number),
             "-hls_segment_filename", str(segment_pattern),
             str(playlist_path),
@@ -644,6 +643,8 @@ class HlsController(Controller):
             info["transcoded_seconds"] = session.max_seekable_seconds()
             info["is_running"] = session.is_running
             info["failed"] = session.failed
+            if session.failed and session._error_message:
+                info["error"] = session._error_message
         return Response(
             content=info,
             status_code=200,
@@ -796,7 +797,7 @@ class HlsController(Controller):
         retries = 0
         while retries < 50:
             if segment_path.exists() and segment_path.stat().st_size > 0:
-                if safe_name == "init.mp4" or self._segment_in_playlist(session, safe_name):
+                if self._segment_in_playlist(session, safe_name):
                     break
             await asyncio.sleep(0.2)
             retries += 1
@@ -808,10 +809,7 @@ class HlsController(Controller):
         if len(content) == 0:
             raise NotFoundException(f"Segment {safe_name} is empty")
 
-        if safe_name.endswith(".ts"):
-            media_type = "video/mp2t"
-        else:
-            media_type = "video/mp4"
+        media_type = "video/mp2t"
 
         return Response(
             content=content,
