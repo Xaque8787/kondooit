@@ -330,6 +330,7 @@ class HlsSession:
         if seek_seconds > 0:
             cmd.extend(["-ss", f"{seek_seconds:.3f}"])
 
+        cmd.extend(["-fflags", "+genpts+discardcorrupt"])
         cmd.extend(["-i", cmd_input, "-map", "0:v:0"])
         if audio_flags:
             cmd.extend(["-map", "0:a:0"])
@@ -811,12 +812,8 @@ class HlsController(Controller):
 
         if safe_name.endswith(".ts"):
             media_type = "video/mp2t"
-        elif safe_name.endswith(".m4s"):
-            media_type = "video/iso.segment"
-        elif safe_name.endswith(".mp4"):
-            media_type = "video/mp4"
         else:
-            media_type = "application/octet-stream"
+            media_type = "video/mp4"
 
         return Response(
             content=content,
