@@ -170,8 +170,14 @@ export function PlayerPage() {
     let mediaErrorRecoveries = 0;
     let networkRetries = 0;
     const MAX_NETWORK_RETRIES = 5;
-    hls.on(Hls.Events.ERROR, (_event, data) => {
+    hls.on(Hls.Events.ERROR, async (_event, data) => {
       console.error("[HLS ERROR]", data.type, data.details, data.fatal, data.reason, data.response?.code);
+      if (data.response?.code && [500, 410].includes(data.response.code)) {
+        try {
+          const info = await api.get(`/api/hls/${streamId}/info`);
+          if (info.error) console.error("[HLS SERVER ERROR]", info.error);
+        } catch {}
+      }
       if (!data.fatal) return;
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaErrorRecoveries < 3) {
         mediaErrorRecoveries++;
