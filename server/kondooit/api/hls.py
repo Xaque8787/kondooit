@@ -498,11 +498,11 @@ class HlsSessionManager:
             if probe:
                 self._probes[stream_id] = probe
 
-        # If probe returned empty codecs, the upstream URL is unreachable
+        # If probe returned empty codecs, log it but still try FFmpeg
+        # (FFmpeg handles redirects and auth better than ffprobe)
         if probe and not probe.video_codec and not probe.audio_codec:
-            logger.error("Probe returned no codecs for %s — upstream URL likely unreachable", stream_id)
-            self._failure_counts[stream_id] = MAX_STREAM_FAILURES
-            return None
+            logger.warning("Probe returned no codecs for %s — will attempt full transcode", stream_id)
+            probe = None
 
         session_hash = hashlib.sha256(stream_id.encode()).hexdigest()[:12]
         output_dir = HLS_SEGMENT_DIR / session_hash
@@ -625,8 +625,7 @@ class HlsController(Controller):
             if probe:
                 hls_manager._probes[stream_id] = probe
 
-        # Detect unreachable upstream
-        probe_failed = probe is None or (not probe.video_codec and not probe.audio_codec)
+        probe_incomplete = probe is None or (not probe.video_codec and not probe.audio_codec)
 
         session = hls_manager.get(stream_id)
 
@@ -637,10 +636,10 @@ class HlsController(Controller):
             "audio_codec": probe.audio_codec if probe else "",
             "width": probe.width if probe else 0,
             "height": probe.height if probe else 0,
-            "probe_failed": probe_failed,
+            "probe_failed": False,
         }
-        if probe_failed:
-            info["error"] = "Could not reach the source — the link may have expired"
+        if probe_incomplete:
+            info["decision"] = "full transcode (probe unavailable)"
         if session:
             info["decision"] = session._decision_reason
             info["transcoded_seconds"] = session.max_seekable_seconds()
