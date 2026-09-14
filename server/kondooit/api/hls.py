@@ -344,7 +344,6 @@ class HlsSession:
 
         cmd.extend(["-max_muxing_queue_size", "4096"])
         cmd.extend([
-            "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
             "-f", "hls",
             "-hls_time", str(SEGMENT_DURATION),
             "-hls_list_size", "0",
