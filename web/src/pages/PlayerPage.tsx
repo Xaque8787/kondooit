@@ -154,7 +154,7 @@ export function PlayerPage() {
       levelLoadingMaxRetry: 6,
       fragLoadingRetryDelay: 1000,
       fragLoadingMaxRetry: 6,
-      debug: true,
+      debug: false,
     });
     hlsRef.current = hls;
     hls.loadSource(hlsUrl);
