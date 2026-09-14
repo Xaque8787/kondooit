@@ -174,6 +174,9 @@ export function PlayerPage() {
       console.error("[HLS ERROR]", data.type, data.details, data.fatal, data.reason, data.response?.code);
       if (data.response?.code && [500, 410].includes(data.response.code)) {
         try {
+          if (data.response.text) console.error("[HLS RESPONSE]", data.response.text);
+        } catch {}
+        try {
           const res = await fetch(`/api/hls/${streamId}/info`);
           const info = await res.json();
           if (info.error) console.error("[HLS SERVER ERROR]", info.error);

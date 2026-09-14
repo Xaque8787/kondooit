@@ -228,34 +228,23 @@ def decide_codecs(
 
 
 def _build_input_url(handle: StreamHandle) -> str:
-    """Build the input URL for ffprobe/ffmpeg.
+    """Build the input URL for ffprobe/ffmpeg -- always the plain upstream URL.
 
-    If the handle carries Basic auth credentials, embed them in the URL
-    (https://user:pass@host/...) so they survive HTTP 302 redirects.
-    FFmpeg's -headers flag only applies to the initial request; headers
-    are dropped when following redirects (e.g. Easynews 302 to CDN).
+    Auth is handled separately via _build_auth_headers which passes an
+    Authorization header through FFmpeg's -headers flag.
     """
-    from urllib.parse import quote, urlparse, urlunparse
-
-    url = handle.upstream_url
-    if handle.upstream_auth:
-        user, pw = handle.upstream_auth
-        parsed = urlparse(url)
-        netloc = f"{quote(user, safe='')}:{quote(pw, safe='')}@{parsed.hostname}"
-        if parsed.port:
-            netloc += f":{parsed.port}"
-        url = urlunparse(parsed._replace(netloc=netloc))
-    return url
+    return handle.upstream_url
 
 
 def _build_auth_headers(handle: StreamHandle) -> str:
-    """Build FFmpeg -headers string (User-Agent + any extra headers).
-
-    Basic auth is now embedded in the URL by _build_input_url instead
-    of being sent as an Authorization header, so it survives redirects.
-    """
+    """Build FFmpeg -headers string (User-Agent, Authorization, extras)."""
+    import base64
     parts: list[str] = []
     parts.append("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n")
+    if handle.upstream_auth:
+        user, pw = handle.upstream_auth
+        token = base64.b64encode(f"{user}:{pw}".encode()).decode()
+        parts.append(f"Authorization: Basic {token}\r\n")
     for k, v in handle.upstream_headers.items():
         parts.append(f"{k}: {v}\r\n")
     return "".join(parts)
@@ -321,12 +310,11 @@ class HlsSession:
         if input_headers:
             cmd.extend(["-headers", input_headers])
 
-        if not self.handle.upstream_auth:
-            cmd.extend([
-                "-reconnect", "1",
-                "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "5",
-            ])
+        cmd.extend([
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+        ])
 
         if seek_seconds > 0:
             cmd.extend(["-ss", f"{seek_seconds:.3f}"])
@@ -459,6 +447,7 @@ class HlsSessionManager:
         self._sessions: dict[str, HlsSession] = {}
         self._probes: dict[str, ProbeResult] = {}
         self._failure_counts: dict[str, int] = {}
+        self._failure_errors: dict[str, str] = {}
 
     def is_permanently_failed(self, stream_id: str) -> bool:
         return self._failure_counts.get(stream_id, 0) >= MAX_STREAM_FAILURES
@@ -477,8 +466,9 @@ class HlsSessionManager:
             session = self._sessions[stream_id]
             if session.failed:
                 self._failure_counts[stream_id] = self._failure_counts.get(stream_id, 0) + 1
+                self._failure_errors[stream_id] = session._error_message
                 if self._failure_counts[stream_id] >= MAX_STREAM_FAILURES:
-                    logger.error("Stream %s permanently failed after %d attempts", stream_id, self._failure_counts[stream_id])
+                    logger.error("Stream %s permanently failed after %d attempts: %s", stream_id, self._failure_counts[stream_id], session._error_message)
                     await self.remove(stream_id)
                     return None
                 await self.remove(stream_id)
@@ -611,7 +601,7 @@ class HlsController(Controller):
         # Check permanent failure first
         if hls_manager.is_permanently_failed(stream_id):
             return Response(
-                content={"stream_id": stream_id, "failed": True, "error": "Stream source is unreachable"},
+                content={"stream_id": stream_id, "failed": True, "error": hls_manager._failure_errors.get(stream_id, "Stream source is unreachable")},
                 status_code=200,
                 headers={"Access-Control-Allow-Origin": "*"},
             )
