@@ -321,11 +321,12 @@ class HlsSession:
         if input_headers:
             cmd.extend(["-headers", input_headers])
 
-        cmd.extend([
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
-        ])
+        if not self.handle.upstream_auth:
+            cmd.extend([
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5",
+            ])
 
         if seek_seconds > 0:
             cmd.extend(["-ss", f"{seek_seconds:.3f}"])
