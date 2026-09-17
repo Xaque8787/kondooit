@@ -625,6 +625,22 @@ class HlsController(Controller):
 
         probe_incomplete = probe is None or (not probe.video_codec and not probe.audio_codec)
 
+        # Check if the codec decision would require transcoding and if the profile allows it
+        transcode_blocked = False
+        transcode_blocked_reason = ""
+        if probe and not probe_incomplete:
+            _, _, pre_decision = decide_codecs(probe)
+            needs_transcode = "transcode" in pre_decision and "remux" not in pre_decision.split(",")[0]
+            needs_video_transcode = pre_decision.startswith("transcode video") or pre_decision.startswith("full transcode")
+            needs_audio_transcode = "transcode audio" in pre_decision
+            is_remux_only = pre_decision.startswith("remux")
+            if needs_video_transcode and not handle.allow_transcode:
+                transcode_blocked = True
+                transcode_blocked_reason = f"This source requires video transcoding ({pre_decision}) but transcoding is disabled in your profile settings."
+            elif needs_audio_transcode and not is_remux_only and not handle.allow_transcode:
+                transcode_blocked = True
+                transcode_blocked_reason = f"This source requires transcoding ({pre_decision}) but transcoding is disabled in your profile settings."
+
         session = hls_manager.get(stream_id)
 
         info: dict = {
@@ -636,6 +652,11 @@ class HlsController(Controller):
             "height": probe.height if probe else 0,
             "probe_failed": False,
         }
+        if transcode_blocked:
+            info["failed"] = True
+            info["transcode_blocked"] = True
+            info["error"] = transcode_blocked_reason
+            return Response(content=info, status_code=200, headers={"Access-Control-Allow-Origin": "*"})
         if probe_incomplete:
             info["decision"] = "full transcode (probe unavailable)"
         if session:

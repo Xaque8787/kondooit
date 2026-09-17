@@ -232,22 +232,22 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
               </span>
             )}
             {r.playback_compatibility === "direct_play" && (
-              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-600/20 text-emerald-400">
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-600/20 text-emerald-400" title={r.compatibility_reason}>
                 Direct Play
               </span>
             )}
             {r.playback_compatibility === "remux" && (
-              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-sky-600/20 text-sky-400">
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-sky-600/20 text-sky-400" title={r.compatibility_reason}>
                 Remux
               </span>
             )}
             {r.playback_compatibility === "transcode" && (
-              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-600/20 text-amber-400">
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-600/20 text-amber-400" title={r.compatibility_reason}>
                 Transcode
               </span>
             )}
             {r.playback_compatibility === "incompatible" && (
-              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-600/20 text-red-400">
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-600/20 text-red-400" title={r.compatibility_reason}>
                 Incompatible
               </span>
             )}

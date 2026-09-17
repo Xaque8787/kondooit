@@ -35,7 +35,7 @@ class AutoPlaySessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, dict] = {}
 
-    def create(self, candidates: list[SourceResult], easynews_auth: tuple[str, str] | None, query_data: dict) -> str:
+    def create(self, candidates: list[SourceResult], easynews_auth: tuple[str, str] | None, query_data: dict, *, allow_remux: bool = True, allow_transcode: bool = False) -> str:
         self._sweep()
         session_id = f"ap_{secrets.token_urlsafe(12)}"
         self._sessions[session_id] = {
@@ -43,6 +43,8 @@ class AutoPlaySessionStore:
             "index": 0,
             "easynews_auth": easynews_auth,
             "query_data": query_data,
+            "allow_remux": allow_remux,
+            "allow_transcode": allow_transcode,
             "created_at": time.monotonic(),
         }
         return session_id
@@ -168,6 +170,7 @@ class SourceResultResponse(BaseModel):
     is_season_pack: bool = False
     file_count: int = 0
     playback_compatibility: str = "unknown"
+    compatibility_reason: str = ""
 
 
 class ScraperConfigFieldSchema(BaseModel):
@@ -329,6 +332,9 @@ class SourceProviderController(Controller):
 
         easynews_auth = await self._get_easynews_auth(session, source_provider_service)
 
+        prof_remux = profile.allow_remux if profile else True
+        prof_transcode = profile.allow_transcode if profile else False
+
         responses: list[SourceResultResponse] = []
         for r in results:
             stream_id = None
@@ -339,6 +345,8 @@ class SourceProviderController(Controller):
                     upstream_auth=easynews_auth,
                     filename=r.filename,
                     content_type=r._content_type or "video/mp4",
+                    allow_remux=prof_remux,
+                    allow_transcode=prof_transcode,
                 )
             elif r.stream_url and r.stream_url.startswith("http"):
                 stream_id = stream_store.create(
@@ -346,6 +354,8 @@ class SourceProviderController(Controller):
                     upstream_url=r.stream_url,
                     filename=r.filename,
                     content_type="video/mp4",
+                    allow_remux=prof_remux,
+                    allow_transcode=prof_transcode,
                 )
             responses.append(SourceResultResponse(
                 provider_key=r.provider_key,
@@ -362,6 +372,7 @@ class SourceProviderController(Controller):
                 is_season_pack=r.is_season_pack,
                 file_count=r.file_count,
                 playback_compatibility=r.playback_compatibility,
+                compatibility_reason=r.compatibility_reason,
             ))
         return responses
 
@@ -431,10 +442,15 @@ class SourceProviderController(Controller):
         if not candidates:
             return AutoPlayResponse(success=False, detail="No playable sources found")
 
+        prof_remux = profile.allow_remux if profile else True
+        prof_transcode = profile.allow_transcode if profile else False
+
         ap_session_id = _auto_play_store.create(
             candidates=candidates,
             easynews_auth=easynews_auth,
             query_data={"season": data.season, "episode": data.episode},
+            allow_remux=prof_remux,
+            allow_transcode=prof_transcode,
         )
 
         result = await _resolve_next_auto_play(
@@ -703,26 +719,29 @@ _CODEC_MAP = {
 }
 
 
-def _compute_compatibility(result: SourceResult, profile: Profile) -> str:
-    """Determine playback compatibility between a source and a profile's preferences."""
+def _compute_compatibility(result: SourceResult, profile: Profile) -> tuple[str, str]:
+    """Determine playback compatibility and reason between a source and a profile's preferences.
+
+    Returns (compatibility_label, human_reason).
+    """
     res_val = _RESOLUTION_VALUES.get(result.quality, 0)
     if res_val > profile.max_resolution and res_val > 0:
-        return "exceeds_resolution"
+        return "exceeds_resolution", f"Source is {result.quality} but profile limit is {profile.max_resolution}p"
 
     source_codec = _CODEC_MAP.get(result.codec, "")
     client_video = set(profile.client_video_codecs.split(",")) if profile.client_video_codecs else set()
 
     if source_codec and source_codec in client_video:
-        return "direct_play"
+        return "direct_play", f"{result.codec} is natively supported by your browser"
 
     if not source_codec:
-        return "unknown"
+        return "unknown", ""
 
     if profile.allow_remux:
-        return "remux"
+        return "remux", f"{result.codec} will be repackaged for your browser without re-encoding"
     if profile.allow_transcode:
-        return "transcode"
-    return "incompatible"
+        return "transcode", f"{result.codec} is not supported by your browser and will be re-encoded"
+    return "incompatible", f"{result.codec} is not supported by your browser and transcoding is disabled"
 
 
 def _apply_profile_preferences(results: list[SourceResult], profile: Profile) -> list[SourceResult]:
@@ -731,8 +750,8 @@ def _apply_profile_preferences(results: list[SourceResult], profile: Profile) ->
 
     annotated = []
     for r in results:
-        compat = _compute_compatibility(r, profile)
-        annotated.append(replace(r, playback_compatibility=compat))
+        compat, reason = _compute_compatibility(r, profile)
+        annotated.append(replace(r, playback_compatibility=compat, compatibility_reason=reason))
 
     filtered = [r for r in annotated if r.playback_compatibility != "exceeds_resolution"]
     if not profile.allow_direct_play:
@@ -771,6 +790,8 @@ async def _resolve_next_auto_play(
     easynews_auth = ap["easynews_auth"]
     query_data = ap["query_data"]
     start_index = ap["index"]
+    ap_remux = ap.get("allow_remux", True)
+    ap_transcode = ap.get("allow_transcode", False)
 
     for i in range(start_index, len(candidates)):
         r = candidates[i]
@@ -784,6 +805,8 @@ async def _resolve_next_auto_play(
                 upstream_auth=easynews_auth,
                 filename=r.filename,
                 content_type=r._content_type or "video/mp4",
+                allow_remux=ap_remux,
+                allow_transcode=ap_transcode,
             )
         elif r.stream_url and r.stream_url.startswith("http"):
             stream_id = stream_store.create(
@@ -791,6 +814,8 @@ async def _resolve_next_auto_play(
                 upstream_url=r.stream_url,
                 filename=r.filename,
                 content_type="video/mp4",
+                allow_remux=ap_remux,
+                allow_transcode=ap_transcode,
             )
         elif r.info_hash:
             resolve_result = await source_provider_service.resolve_stream(
@@ -804,6 +829,8 @@ async def _resolve_next_auto_play(
                     upstream_url=raw_url,
                     filename=r.filename,
                     content_type="video/mp4",
+                    allow_remux=ap_remux,
+                    allow_transcode=ap_transcode,
                 )
 
         if stream_id:

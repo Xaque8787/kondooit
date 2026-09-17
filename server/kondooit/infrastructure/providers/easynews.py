@@ -77,6 +77,50 @@ def _build_search_query(query: SourceSearchRequest) -> str:
     return " ".join(parts)
 
 
+_SE_PATTERN = re.compile(
+    r"[.\s_-]S(\d{1,2})\s?E(\d{1,3})"   # S01E03, S1E3, S01.E03
+    r"|[.\s_-](\d{1,2})x(\d{1,3})",       # 1x03, 01x03
+    re.IGNORECASE,
+)
+
+_SEASON_ONLY_PATTERN = re.compile(
+    r"[.\s_-]S(\d{1,2})[.\s_-]"           # S01. or S01- without E
+    r"|[.\s_-]Season\s*(\d{1,2})[.\s_-]",
+    re.IGNORECASE,
+)
+
+
+def _extract_season_episode(filename: str) -> tuple[int | None, int | None]:
+    """Extract season and episode numbers from a filename."""
+    m = _SE_PATTERN.search(filename)
+    if m:
+        if m.group(1) is not None:
+            return int(m.group(1)), int(m.group(2))
+        return int(m.group(3)), int(m.group(4))
+    sm = _SEASON_ONLY_PATTERN.search(filename)
+    if sm:
+        s = sm.group(1) or sm.group(2)
+        return int(s), None
+    return None, None
+
+
+def _matches_episode_query(filename: str, query: SourceSearchRequest) -> bool:
+    """Check if a filename matches the requested season/episode."""
+    if query.season is None:
+        return True
+    file_s, file_e = _extract_season_episode(filename)
+    if file_s is None:
+        return False
+    if file_s != query.season:
+        return False
+    if query.episode is not None:
+        if file_e is None:
+            return False
+        if file_e != query.episode:
+            return False
+    return True
+
+
 def build_easynews_download_url(
     down_url: str, dl_farm: str, dl_port: str,
     post_hash: str, ext: str, filename: str,
@@ -168,6 +212,14 @@ class EasynewsProvider(SourceProvider):
             return []
 
         results = self._parse_results(data)
+
+        if query.season is not None:
+            filtered = [r for r in results if _matches_episode_query(r.filename, query)]
+            logger.info(
+                "Easynews search for %r: %d raw items -> %d parsed -> %d after S/E filter",
+                search_text, len(data.get("data", [])), len(results), len(filtered),
+            )
+            return filtered
         logger.info("Easynews search for %r returned %d results (raw items: %d)",
                      search_text, len(results), len(data.get("data", [])))
         return results

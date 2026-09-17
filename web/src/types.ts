@@ -332,6 +332,7 @@ export interface SourceResult {
   is_season_pack: boolean;
   file_count: number;
   playback_compatibility: string;
+  compatibility_reason: string;
 }
 
 export interface ScraperConfigFieldSchema {

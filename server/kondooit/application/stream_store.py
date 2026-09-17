@@ -23,6 +23,8 @@ class StreamHandle:
     content_type: str = "application/octet-stream"
     created_at: float = 0.0
     expires_at: float = 0.0
+    allow_remux: bool = True
+    allow_transcode: bool = False
 
 
 DEFAULT_TTL_SECONDS = 4 * 3600  # 4 hours
@@ -44,6 +46,8 @@ class StreamHandleStore:
         upstream_auth: tuple[str, str] | None = None,
         filename: str = "",
         content_type: str = "application/octet-stream",
+        allow_remux: bool = True,
+        allow_transcode: bool = False,
     ) -> str:
         self._sweep()
         stream_id = f"kd_{secrets.token_urlsafe(16)}"
@@ -58,6 +62,8 @@ class StreamHandleStore:
             content_type=content_type,
             created_at=now,
             expires_at=now + self._ttl,
+            allow_remux=allow_remux,
+            allow_transcode=allow_transcode,
         )
         return stream_id
 
