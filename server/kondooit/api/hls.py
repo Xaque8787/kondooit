@@ -228,23 +228,32 @@ def decide_codecs(
 
 
 def _build_input_url(handle: StreamHandle) -> str:
-    """Build the input URL for ffprobe/ffmpeg -- always the plain upstream URL.
+    """Build the input URL for ffprobe/ffmpeg.
 
-    Auth is handled separately via _build_auth_headers which passes an
-    Authorization header through FFmpeg's -headers flag.
+    Embeds Basic auth credentials directly in the URL (user:pass@host)
+    so FFmpeg's native HTTP handler sends them, including through redirects.
     """
-    return handle.upstream_url
+    url = handle.upstream_url
+    if handle.upstream_auth:
+        from urllib.parse import quote, urlparse, urlunparse
+        user, pw = handle.upstream_auth
+        parsed = urlparse(url)
+        userinfo = f"{quote(user, safe='')}:{quote(pw, safe='')}"
+        host = parsed.hostname or ""
+        if parsed.port:
+            host += f":{parsed.port}"
+        url = urlunparse(parsed._replace(netloc=f"{userinfo}@{host}"))
+    return url
 
 
 def _build_auth_headers(handle: StreamHandle) -> str:
-    """Build FFmpeg -headers string (User-Agent, Authorization, extras)."""
-    import base64
+    """Build FFmpeg -headers string (User-Agent + any extra headers).
+
+    Basic auth is embedded in the URL by _build_input_url so it survives
+    HTTP redirects. Only non-auth headers go here.
+    """
     parts: list[str] = []
     parts.append("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n")
-    if handle.upstream_auth:
-        user, pw = handle.upstream_auth
-        token = base64.b64encode(f"{user}:{pw}".encode()).decode()
-        parts.append(f"Authorization: Basic {token}\r\n")
     for k, v in handle.upstream_headers.items():
         parts.append(f"{k}: {v}\r\n")
     return "".join(parts)
