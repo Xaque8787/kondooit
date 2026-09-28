@@ -206,22 +206,72 @@ fn parse_http_response(raw: &str) -> String {
 
     // Parse headers into a JSON object
     let mut headers = serde_json::Map::new();
+    let mut is_chunked = false;
     for line in lines {
         if let Some((key, value)) = line.split_once(':') {
-            headers.insert(
-                key.trim().to_lowercase(),
-                serde_json::Value::String(value.trim().to_string()),
-            );
+            let key_lower = key.trim().to_lowercase();
+            let val_trimmed = value.trim().to_string();
+            if key_lower == "transfer-encoding" && val_trimmed.to_lowercase().contains("chunked") {
+                is_chunked = true;
+            }
+            headers.insert(key_lower, serde_json::Value::String(val_trimmed));
         }
     }
+
+    let decoded_body = if is_chunked {
+        decode_chunked(body)
+    } else {
+        body.to_string()
+    };
 
     let result = serde_json::json!({
         "status": status,
         "headers": headers,
-        "body": body,
+        "body": decoded_body,
     });
 
     result.to_string()
+}
+
+fn decode_chunked(raw: &str) -> String {
+    let mut result = String::new();
+    let mut remaining = raw;
+
+    loop {
+        // Find the chunk size line
+        let size_end = match remaining.find("\r\n") {
+            Some(pos) => pos,
+            None => break,
+        };
+        let size_str = remaining[..size_end].trim();
+        let chunk_size = match usize::from_str_radix(size_str, 16) {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+
+        if chunk_size == 0 {
+            break;
+        }
+
+        let data_start = size_end + 2;
+        let data_end = data_start + chunk_size;
+        if data_end > remaining.len() {
+            // Partial chunk -- take what we can
+            result.push_str(&remaining[data_start..]);
+            break;
+        }
+
+        result.push_str(&remaining[data_start..data_end]);
+
+        // Skip past chunk data + trailing \r\n
+        let next = data_end + 2;
+        if next >= remaining.len() {
+            break;
+        }
+        remaining = &remaining[next..];
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
