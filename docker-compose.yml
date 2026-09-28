@@ -17,7 +17,8 @@ services:
 
   server:
     build:
-      context: ./server
+      context: .
+      dockerfile: server/Dockerfile
     ports:
       - "8000:8000"
     environment:
@@ -25,6 +26,7 @@ services:
       KONDOOIT_DEBUG: "true"
     volumes:
       - ./scraper_modules:/scraper_modules:ro
+      - iroh-data:/data/iroh
     depends_on:
       db:
         condition: service_healthy
@@ -39,3 +41,4 @@ services:
 
 volumes:
   pgdata:
+  iroh-data:

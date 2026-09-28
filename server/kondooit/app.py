@@ -20,6 +20,7 @@ from kondooit.api.discovery import DiscoveryController
 from kondooit.api.health import health
 from kondooit.api.profiles import ProfileController
 from kondooit.api.providers import ProviderController
+from kondooit.api.remote_access import RemoteAccessController
 from kondooit.api.source_providers import SourceProviderController
 from kondooit.api.streams import StreamController
 from kondooit.api.hls import HlsController, HlsSessionManager
@@ -61,6 +62,8 @@ from kondooit.infrastructure.source_provider_repo import SqlAlchemySourceProvide
 from kondooit.infrastructure.profile_repo import SqlAlchemyProfileRepository
 from kondooit.infrastructure.user_state_repo import SqlAlchemyUserContentStateRepository
 from kondooit.infrastructure.watch_progress_repo import SqlAlchemyWatchProgressRepository
+from kondooit.infrastructure.iroh.control import IrohControlClient
+from kondooit.infrastructure.iroh.sidecar import IrohSidecar
 from kondooit.infrastructure.security import BcryptPasswordHasher, JwtTokenService
 
 logger = logging.getLogger(__name__)
@@ -143,6 +146,15 @@ def create_app(settings: Settings | None = None) -> Litestar:
     watch_progress_repo = SqlAlchemyWatchProgressRepository()
     watch_progress_service = WatchProgressService(watch_progress_repo)
 
+    # Iroh remote access sidecar
+    iroh_sidecar = IrohSidecar(
+        binary_path=settings.iroh_binary_path,
+        data_dir=settings.iroh_data_dir,
+        target_port=settings.iroh_target_port,
+        control_socket=settings.iroh_control_socket,
+    )
+    iroh_control = IrohControlClient(settings.iroh_control_socket)
+
     @asynccontextmanager
     async def lifespan(app: Litestar) -> AsyncIterator[None]:
         app.state.session_factory = session_factory
@@ -158,9 +170,9 @@ def create_app(settings: Settings | None = None) -> Litestar:
             for mod_record in installed:
                 loaded = load_module(mod_record.source_path)
                 if loaded:
-                    settings = await scraper_module_repo.list_settings(session, mod_record.module_id)
-                    enabled_keys = {s.scraper_key for s in settings if s.enabled}
-                    saved_configs = {s.scraper_key: s.config for s in settings if s.config}
+                    mod_settings = await scraper_module_repo.list_settings(session, mod_record.module_id)
+                    enabled_keys = {s.scraper_key for s in mod_settings if s.enabled}
+                    saved_configs = {s.scraper_key: s.config for s in mod_settings if s.config}
                     scraper_manager.add_module(loaded, enabled_keys=enabled_keys, saved_configs=saved_configs)
                     logger.info(
                         "Loaded installed module '%s' from %s (%d scrapers, enabled_keys=%s)",
@@ -175,9 +187,19 @@ def create_app(settings: Settings | None = None) -> Litestar:
                 len(scraper_manager.get_enabled_scrapers()),
             )
 
+        # Auto-start iroh sidecar if enabled
+        if settings.iroh_enabled:
+            try:
+                await iroh_sidecar.start()
+                logger.info("Iroh sidecar started (iroh_enabled=True)")
+            except Exception:
+                logger.exception("Failed to start iroh sidecar on startup")
+
         try:
             yield
         finally:
+            if iroh_sidecar.running:
+                await iroh_sidecar.stop()
             await engine.dispose()
 
     async def provide_session() -> AsyncIterator[AsyncSession]:
@@ -217,8 +239,17 @@ def create_app(settings: Settings | None = None) -> Litestar:
     async def provide_hls_manager() -> AsyncIterator[HlsSessionManager]:
         yield hls_manager
 
+    async def provide_iroh_sidecar() -> AsyncIterator[IrohSidecar]:
+        yield iroh_sidecar
+
+    async def provide_iroh_control() -> AsyncIterator[IrohControlClient]:
+        yield iroh_control
+
+    async def provide_settings() -> AsyncIterator[Settings]:
+        yield settings
+
     return Litestar(
-        route_handlers=[health, AuthController, ProfileController, ProviderController, SourceProviderController, StreamController, HlsController, CatalogController, DiscoveryController, UserStateController, WatchProgressController],
+        route_handlers=[health, AuthController, ProfileController, ProviderController, SourceProviderController, StreamController, HlsController, CatalogController, DiscoveryController, UserStateController, WatchProgressController, RemoteAccessController],
         lifespan=[lifespan],
         dependencies={
             "session": provide_session,
@@ -233,6 +264,9 @@ def create_app(settings: Settings | None = None) -> Litestar:
             "profile_service": provide_profile_service,
             "watch_progress_service": provide_watch_progress_service,
             "hls_manager": provide_hls_manager,
+            "iroh_sidecar": provide_iroh_sidecar,
+            "iroh_control": provide_iroh_control,
+            "settings": provide_settings,
         },
         debug=settings.debug,
     )

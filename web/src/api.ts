@@ -380,4 +380,17 @@ export const api = {
 
   getSeriesProgress: (providerKey: string, seriesExternalId: number) =>
     request<WatchProgressResponse[]>(`/watch-progress/series/${providerKey}/${seriesExternalId}`),
+
+  // Remote Access
+  remoteAccessStatus: () =>
+    request<{ enabled: boolean; online: boolean; endpoint_id: string | null; relay_connected: boolean }>("/remote-access/status"),
+
+  remoteAccessEnable: () =>
+    request<{ enabled: boolean; online: boolean }>("/remote-access/enable", { method: "POST" }),
+
+  remoteAccessDisable: () =>
+    request<{ enabled: boolean; online: boolean }>("/remote-access/disable", { method: "POST" }),
+
+  remoteAccessConnectionUrl: () =>
+    request<{ url: string }>("/remote-access/connection-url"),
 };

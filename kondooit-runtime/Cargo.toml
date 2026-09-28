@@ -1,0 +1,44 @@
+[package]
+name = "kondooit-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Browser WASM runtime for Kondooit — establishes iroh connections to a Kondooit server sidecar"
+
+# cdylib: the wasm artifact loaded by the browser.
+# rlib: lets the crate also be used as a normal Rust dependency / tested natively.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Pinned to the installed `wasm-bindgen` CLI. The crate and CLI versions
+# MUST match exactly or the generated JS bindings are rejected at load time.
+wasm-bindgen = "=0.2.126"
+
+# Bridges Rust `async fn` exports to JS Promises.
+wasm-bindgen-futures = "0.4"
+
+# Routes Rust panics to console.error with a readable message + stack.
+console_error_panic_hook = "0.1.7"
+
+# iroh in the browser: relay-only (browsers can't open UDP/QUIC sockets).
+# default-features = false drops metrics, which doesn't compile on wasm32.
+iroh = { version = "1", default-features = false }
+
+# JS interop for returning Promises from non-async methods.
+js-sys = "0.3"
+
+# wasm32 has no OS RNG; route getrandom to the JS crypto API (see .cargo/config.toml).
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+# Logging: surface iroh's tracing logs in the browser console.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber-wasm = "0.1.0"
+
+[profile.release]
+opt-level = "s"     # optimize for size — wasm ships over the wire
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

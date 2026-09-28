@@ -1,0 +1,15 @@
+{
+  "name": "kondooit-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kondooit browser WASM runtime — iroh-based tunnel connection from the browser",
+  "scripts": {
+    "build:wasm": "cargo build --target wasm32-unknown-unknown --release",
+    "build:bindgen": "wasm-bindgen target/wasm32-unknown-unknown/release/kondooit_runtime.wasm --out-dir public/wasm --target web --no-typescript",
+    "build": "npm run build:wasm && npm run build:bindgen",
+    "serve": "npx serve public -l 8080 --cors",
+    "clean": "cargo clean && rm -rf public/wasm"
+  },
+  "keywords": ["kondooit", "wasm", "iroh", "tunnel"],
+  "license": "MIT"
+}

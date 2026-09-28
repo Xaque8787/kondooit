@@ -56,6 +56,9 @@ export function Layout() {
                 <NavLink to="/providers" className={navLinkClass}>
                   Providers
                 </NavLink>
+                <NavLink to="/remote-access" className={navLinkClass}>
+                  Remote
+                </NavLink>
               </nav>
             </div>
             <div className="flex items-center gap-3">

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kondooit</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Kondooit</h1>
+      <p class="subtitle">Secure tunnel runtime</p>
+    </header>
+
+    <section id="status-section">
+      <div class="status-steps">
+        <div class="step" id="step-loading" data-status="pending">
+          <span class="step-icon"></span>
+          <span class="step-label">Loading runtime…</span>
+        </div>
+        <div class="step" id="step-endpoint" data-status="pending">
+          <span class="step-icon"></span>
+          <span class="step-label">Creating endpoint…</span>
+        </div>
+        <div class="step" id="step-connecting" data-status="pending">
+          <span class="step-icon"></span>
+          <span class="step-label">Connecting to server…</span>
+        </div>
+        <div class="step" id="step-connected" data-status="pending">
+          <span class="step-icon"></span>
+          <span class="step-label">Connected!</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="info-section" class="hidden">
+      <div class="info-card">
+        <div class="info-row">
+          <span class="info-label">Your endpoint</span>
+          <code id="local-endpoint-id" class="mono">—</code>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Server endpoint</span>
+          <code id="server-endpoint-id" class="mono">—</code>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Status</span>
+          <span id="connection-status">—</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="ping-section" class="hidden">
+      <button id="ping-btn" type="button">Send PING</button>
+      <div id="ping-result" class="mono"></div>
+    </section>
+
+    <section id="error-section" class="hidden">
+      <div class="error-card">
+        <h2>Connection Error</h2>
+        <p id="error-message"></p>
+        <p class="error-hint">Check the browser console for details.</p>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

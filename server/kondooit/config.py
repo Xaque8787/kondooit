@@ -34,6 +34,11 @@ class Settings(BaseSettings):
 
     # iroh — optional, server operates without it
     iroh_enabled: bool = False
+    iroh_data_dir: str = "/data/iroh"
+    iroh_binary_path: str = "/usr/local/bin/kondooit-iroh"
+    iroh_control_socket: str = "/tmp/kondooit-iroh.sock"
+    iroh_target_port: int = 8000
+    runtime_base_url: str = "https://xaque8787.github.io/kondooit/runtime/"
 
 
 def get_settings() -> Settings:
