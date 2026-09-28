@@ -81,23 +81,29 @@ async fn dispatch_stream(
 }
 
 /// Pipe a bidi stream to a TCP connection and back (HTTP proxy).
+///
+/// Sequential: forward the full request, then read the full response.
+/// HTTP/1.1 request-response is inherently sequential, so this is correct
+/// and avoids the problem of `select!` cancelling the response read when
+/// the request write finishes.
 async fn proxy_to_tcp(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     addr: &str,
 ) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
     let mut tcp = TcpStream::connect(addr).await?;
     let (mut tcp_read, mut tcp_write) = tcp.split();
 
-    let client_to_server = tokio::io::copy(&mut recv, &mut tcp_write);
-    let server_to_client = tokio::io::copy(&mut tcp_read, &mut send);
+    // 1. Forward complete request: iroh → TCP
+    tokio::io::copy(&mut recv, &mut tcp_write).await?;
+    tcp_write.shutdown().await?;
 
-    tokio::select! {
-        r = client_to_server => { r?; }
-        r = server_to_client => { r?; }
-    }
-
+    // 2. Forward complete response: TCP → iroh
+    tokio::io::copy(&mut tcp_read, &mut send).await?;
     let _ = send.finish();
+
     Ok(())
 }
 
