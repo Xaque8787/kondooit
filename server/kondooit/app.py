@@ -69,6 +69,62 @@ from kondooit.infrastructure.security import BcryptPasswordHasher, JwtTokenServi
 logger = logging.getLogger(__name__)
 
 
+class ContentLengthMiddleware:
+    """ASGI middleware that buffers non-streaming responses and sends them with
+    Content-Length instead of Transfer-Encoding: chunked.
+
+    The iroh tunnel's browser-side HTTP parser cannot decode chunked encoding,
+    so this ensures all non-streaming responses use an explicit length.
+    Streaming responses (multiple body chunks) pass through unchanged.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        initial_message = None
+        body_parts = []
+        streaming = False
+
+        async def buffered_send(message):
+            nonlocal initial_message, body_parts, streaming
+
+            if streaming:
+                await send(message)
+                return
+
+            if message["type"] == "http.response.start":
+                initial_message = message
+                return
+
+            if message["type"] == "http.response.body":
+                body = message.get("body", b"")
+                more_body = message.get("more_body", False)
+                body_parts.append(body)
+
+                if more_body:
+                    streaming = True
+                    await send(initial_message)
+                    for part in body_parts:
+                        await send({"type": "http.response.body", "body": part, "more_body": True})
+                    body_parts = []
+                else:
+                    full_body = b"".join(body_parts)
+                    headers = list(initial_message.get("headers", []))
+                    skip = {b"transfer-encoding", b"content-length"}
+                    headers = [(k, v) for k, v in headers if k.lower() not in skip]
+                    headers.append((b"content-length", str(len(full_body)).encode()))
+                    initial_message["headers"] = headers
+                    await send(initial_message)
+                    await send({"type": "http.response.body", "body": full_body, "more_body": False})
+
+        await self.app(scope, receive, buffered_send)
+
+
 def create_app(settings: Settings | None = None) -> Litestar:
     """Create and configure the Litestar application."""
     settings = settings or get_settings()
@@ -251,6 +307,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
     return Litestar(
         route_handlers=[health, AuthController, ProfileController, ProviderController, SourceProviderController, StreamController, HlsController, CatalogController, DiscoveryController, UserStateController, WatchProgressController, RemoteAccessController],
         lifespan=[lifespan],
+        middleware=[ContentLengthMiddleware],
         dependencies={
             "session": provide_session,
             "auth_service": provide_auth_service,
