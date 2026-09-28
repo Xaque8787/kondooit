@@ -69,13 +69,16 @@ from kondooit.infrastructure.security import BcryptPasswordHasher, JwtTokenServi
 logger = logging.getLogger(__name__)
 
 
-class ContentLengthMiddleware:
-    """ASGI middleware that buffers non-streaming responses and sends them with
-    Content-Length instead of Transfer-Encoding: chunked.
+class TunnelCompatMiddleware:
+    """ASGI middleware that ensures responses are compatible with the iroh tunnel.
 
-    The iroh tunnel's browser-side HTTP parser cannot decode chunked encoding,
-    so this ensures all non-streaming responses use an explicit length.
-    Streaming responses (multiple body chunks) pass through unchanged.
+    Two fixes:
+    1. Adds Connection: close so uvicorn closes the TCP socket after each
+       response. Without this, the tunnel sidecar's tokio::io::copy hangs
+       waiting for EOF that never comes (HTTP/1.1 keep-alive).
+    2. Buffers non-streaming responses and replaces chunked transfer encoding
+       with an explicit Content-Length header, since the browser-side WASM
+       HTTP parser does not decode chunked encoding.
     """
 
     def __init__(self, app):
@@ -108,6 +111,7 @@ class ContentLengthMiddleware:
 
                 if more_body:
                     streaming = True
+                    _inject_close(initial_message)
                     await send(initial_message)
                     for part in body_parts:
                         await send({"type": "http.response.body", "body": part, "more_body": True})
@@ -118,11 +122,18 @@ class ContentLengthMiddleware:
                     skip = {b"transfer-encoding", b"content-length"}
                     headers = [(k, v) for k, v in headers if k.lower() not in skip]
                     headers.append((b"content-length", str(len(full_body)).encode()))
+                    headers.append((b"connection", b"close"))
                     initial_message["headers"] = headers
                     await send(initial_message)
                     await send({"type": "http.response.body", "body": full_body, "more_body": False})
 
         await self.app(scope, receive, buffered_send)
+
+
+def _inject_close(msg: dict) -> None:
+    headers = list(msg.get("headers", []))
+    headers.append((b"connection", b"close"))
+    msg["headers"] = headers
 
 
 def create_app(settings: Settings | None = None) -> Litestar:
@@ -307,7 +318,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
     return Litestar(
         route_handlers=[health, AuthController, ProfileController, ProviderController, SourceProviderController, StreamController, HlsController, CatalogController, DiscoveryController, UserStateController, WatchProgressController, RemoteAccessController],
         lifespan=[lifespan],
-        middleware=[ContentLengthMiddleware],
+        middleware=[TunnelCompatMiddleware],
         dependencies={
             "session": provide_session,
             "auth_service": provide_auth_service,
