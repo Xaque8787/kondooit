@@ -24,6 +24,7 @@ console_error_panic_hook = "0.1.7"
 # iroh in the browser: relay-only (browsers can't open UDP/QUIC sockets).
 # default-features = false drops metrics, which doesn't compile on wasm32.
 iroh = { version = "1.0.0", default-features = false, features = ["tls-ring"] }
+iroh-base = { version = "1", default-features = false }
 
 # JS interop for returning Promises from non-async methods.
 js-sys = "0.3"

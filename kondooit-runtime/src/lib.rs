@@ -43,7 +43,7 @@ impl KondooitConnection {
         &self,
         endpoint_id: &str,
     ) -> Result<iroh::endpoint::Connection, ConnectError> {
-        let node_id: iroh::NodeId = endpoint_id
+        let node_id: iroh_base::NodeId = endpoint_id
             .trim()
             .parse()
             .map_err(|e| ConnectError::InvalidEndpointId(format!("{e}")))?;
