@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     let ep = endpoint::create_endpoint(&args.data_dir).await?;
 
     // 2. Wait for relay connectivity.
-    ep.online().await?;
+    ep.online().await;
     info!(id = %ep.id(), "endpoint online");
 
     // 3. Build the protocol router with our tunnel handler.

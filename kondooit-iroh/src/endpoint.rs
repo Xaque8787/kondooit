@@ -13,7 +13,7 @@ fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
             .map_err(|_| anyhow::anyhow!("invalid secret key length"))?;
         Ok(SecretKey::from_bytes(&bytes))
     } else {
-        let key = SecretKey::generate(rand::rngs::OsRng);
+        let key = SecretKey::generate();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("creating key directory")?;
         }

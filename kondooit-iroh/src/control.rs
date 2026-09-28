@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use iroh::Endpoint;
+use iroh::{Endpoint, EndpointAddr, Watcher};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -117,7 +117,7 @@ async fn handle_command(
     match cmd {
         "status" => {
             let endpoint_id = endpoint.id().to_string();
-            let relay_connected = endpoint.home_relay().is_some();
+            let relay_connected = !endpoint.home_relay_status().get().is_empty();
             Response::Status {
                 online: true,
                 endpoint_id,
@@ -125,17 +125,9 @@ async fn handle_command(
             }
         }
         "ticket" => {
-            match endpoint.endpoint_addr().await {
-                Ok(addr) => {
-                    // Serialize the EndpointAddr as the ticket string.
-                    // EndpointAddr implements Display which gives a base32 ticket.
-                    Response::Ticket {
-                        ticket: addr.to_string(),
-                    }
-                }
-                Err(e) => Response::Error {
-                    error: format!("failed to get endpoint addr: {e}"),
-                },
+            let addr = EndpointAddr::from(endpoint.id());
+            Response::Ticket {
+                ticket: addr.to_string(),
             }
         }
         "shutdown" => {
