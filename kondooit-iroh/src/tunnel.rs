@@ -99,7 +99,10 @@ async fn proxy_to_tcp(
 
     // 1. Forward complete request: iroh → TCP
     let req_bytes = tokio::io::copy(&mut recv, &mut tcp_write).await?;
-    tcp_write.shutdown().await?;
+    // Do NOT call tcp_write.shutdown() here — sending a TCP FIN causes
+    // uvicorn's h11 to treat it as "client disconnected" and abort without
+    // responding. The request carries Content-Length so uvicorn knows exactly
+    // when the body ends; no half-close is needed.
     info!("HTTP proxy: forwarded {req_bytes} request bytes, reading response headers");
 
     // 2. Read the HTTP response headers, then the exact body length.
