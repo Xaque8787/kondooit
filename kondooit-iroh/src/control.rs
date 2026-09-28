@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use iroh::{Endpoint, EndpointAddr, Watcher};
+use iroh::{Endpoint, Watcher};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -125,9 +125,8 @@ async fn handle_command(
             }
         }
         "ticket" => {
-            let addr = EndpointAddr::from(endpoint.id());
             Response::Ticket {
-                ticket: addr.to_string(),
+                ticket: endpoint.id().to_string(),
             }
         }
         "shutdown" => {
