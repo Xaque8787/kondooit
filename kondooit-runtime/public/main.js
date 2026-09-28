@@ -86,12 +86,26 @@ async function tunnelFetch(method, path, { headers = {}, body = null } = {}) {
     headerPairs.push(["Content-Type", "application/json"]);
   }
 
-  const rawJson = await runtime.http_fetch(
-    method,
-    path,
-    JSON.stringify(headerPairs),
-    body || null,
-  );
+  console.log(`[tunnelFetch] ${method} ${path}`);
+
+  if (typeof runtime.http_fetch !== "function") {
+    throw new Error("WASM runtime does not have http_fetch — the deployed WASM may be outdated. Redeploy the browser runtime.");
+  }
+
+  let rawJson;
+  try {
+    rawJson = await runtime.http_fetch(
+      method,
+      path,
+      JSON.stringify(headerPairs),
+      body || null,
+    );
+  } catch (err) {
+    console.error(`[tunnelFetch] http_fetch threw:`, err);
+    throw err;
+  }
+
+  console.log(`[tunnelFetch] raw response (first 200 chars):`, rawJson?.slice?.(0, 200));
 
   const parsed = JSON.parse(rawJson);
   let responseBody = parsed.body || "";
@@ -103,6 +117,7 @@ async function tunnelFetch(method, path, { headers = {}, body = null } = {}) {
     parsed.json = null;
   }
 
+  console.log(`[tunnelFetch] ${method} ${path} => status=${parsed.status}`);
   return parsed;
 }
 
