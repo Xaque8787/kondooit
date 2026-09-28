@@ -376,26 +376,94 @@ async function searchSources(item, tab) {
   $actions.innerHTML = `<div class="source-loading"><div class="spinner"></div> Searching for sources...</div>`;
 
   try {
-    const resp = await tunnelFetch(
-      "GET",
-      `/source-providers/search?content_type=${contentType}&content_id=${item.id}&title=${encodeURIComponent(item.title)}&year=${item.release_date?.slice(0, 4) || ""}`,
-    );
+    const body = {
+      title: item.title,
+      content_type: contentType,
+      tmdb_id: item.tmdb_id || undefined,
+      year: item.release_date ? parseInt(item.release_date.slice(0, 4), 10) : undefined,
+    };
+
+    const resp = await tunnelFetch("POST", "/source-providers/search", {
+      body: JSON.stringify(body),
+    });
 
     if (resp.status === 200 && resp.json && resp.json.length > 0) {
       $actions.innerHTML = `<h3 class="sources-title">${resp.json.length} source(s) found</h3>`;
       for (const source of resp.json) {
         const row = document.createElement("div");
         row.className = "source-row";
+
+        const sizeMB = source.size_bytes > 0
+          ? (source.size_bytes >= 1073741824
+            ? (source.size_bytes / 1073741824).toFixed(1) + " GB"
+            : (source.size_bytes / 1048576).toFixed(0) + " MB")
+          : "";
+        const quality = source.quality || "";
+        const codec = source.codec || "";
+        const provider = source.provider_key || "";
+        const sourceType = source.source_type || "";
+        const compat = source.playback_compatibility || "";
+
+        let badges = "";
+        if (quality) badges += `<span class="source-badge quality">${quality}</span>`;
+        if (codec) badges += `<span class="source-badge codec">${codec}</span>`;
+        if (sourceType === "cached_torrent") badges += `<span class="source-badge cached">Cached</span>`;
+        if (sourceType === "direct") badges += `<span class="source-badge direct">Direct</span>`;
+        if (sourceType === "in_library") badges += `<span class="source-badge cached">In Library</span>`;
+        if (compat === "direct_play") badges += `<span class="source-badge compat-good">Direct Play</span>`;
+        else if (compat === "remux") badges += `<span class="source-badge compat-ok">Remux</span>`;
+
         row.innerHTML = `
           <div class="source-info">
-            <span class="source-name">${source.title || source.name || "Source"}</span>
-            <span class="source-detail">${source.quality || ""} ${source.size_display || ""}</span>
+            <span class="source-name">${source.filename || "Source"}</span>
+            <div class="source-badges">${badges}</div>
+            <span class="source-detail">${sizeMB} ${provider ? "via " + provider : ""}</span>
           </div>
-          <button class="btn-small btn-primary">Play</button>
         `;
-        row.querySelector("button").addEventListener("click", () => {
-          attemptPlayback(source);
-        });
+
+        // Determine what action buttons to show
+        const btnContainer = document.createElement("div");
+        btnContainer.className = "source-actions";
+
+        if (source.stream_id) {
+          // Already has a stream handle — can attempt play
+          const playBtn = document.createElement("button");
+          playBtn.className = "btn-small btn-primary";
+          playBtn.textContent = "Play";
+          playBtn.addEventListener("click", () => attemptPlayback(source.stream_id, source.filename));
+          btnContainer.appendChild(playBtn);
+        } else if (source.info_hash) {
+          // Needs resolve first
+          const resolveBtn = document.createElement("button");
+          resolveBtn.className = "btn-small btn-primary";
+          resolveBtn.textContent = "Stream";
+          resolveBtn.addEventListener("click", async () => {
+            resolveBtn.disabled = true;
+            resolveBtn.textContent = "Resolving...";
+            try {
+              const res = await tunnelFetch("POST", "/source-providers/resolve", {
+                body: JSON.stringify({
+                  info_hash: source.info_hash,
+                  provider_key: source.provider_key,
+                }),
+              });
+              if (res.status === 200 && res.json?.success && res.json.stream_id) {
+                resolveBtn.textContent = "Play";
+                resolveBtn.disabled = false;
+                resolveBtn.onclick = () => attemptPlayback(res.json.stream_id, source.filename);
+              } else {
+                resolveBtn.textContent = "Failed";
+                resolveBtn.disabled = true;
+              }
+            } catch (err) {
+              resolveBtn.textContent = "Error";
+              console.error(err);
+            }
+          });
+          btnContainer.appendChild(resolveBtn);
+        }
+
+        row.appendChild(btnContainer);
         $actions.appendChild(row);
       }
     } else {
@@ -407,12 +475,94 @@ async function searchSources(item, tab) {
   }
 }
 
-async function attemptPlayback(source) {
+async function attemptPlayback(streamId, filename) {
   const $actions = document.getElementById("detail-actions");
-  const note = document.createElement("p");
-  note.className = "detail-note";
-  note.textContent = "Playback through the remote tunnel is not yet supported. Use the main server interface for playback.";
-  $actions.appendChild(note);
+
+  // Show loading state
+  const statusEl = document.createElement("div");
+  statusEl.className = "source-loading";
+  statusEl.innerHTML = `<div class="spinner"></div> Getting playback URL...`;
+  $actions.appendChild(statusEl);
+
+  try {
+    // Ask the server for the direct upstream URL
+    const resp = await tunnelFetch("GET", `/streams/${streamId}/direct-url`);
+
+    if (resp.status === 200 && resp.json?.url) {
+      const directUrl = resp.json.url;
+      const hasAuth = resp.json.has_auth;
+
+      statusEl.remove();
+
+      if (hasAuth) {
+        // Source requires authentication — can't play directly from remote
+        const note = document.createElement("p");
+        note.className = "detail-note warning";
+        note.textContent = "This source requires authentication and cannot be played directly from a remote connection. Use the main server for playback.";
+        $actions.appendChild(note);
+        return;
+      }
+
+      // Launch the video player with the direct URL
+      showPlayer(directUrl, filename || "Video");
+    } else {
+      statusEl.innerHTML = `<p class="detail-note error">Could not get playback URL (${resp.status})</p>`;
+    }
+  } catch (err) {
+    statusEl.innerHTML = `<p class="detail-note error">Playback failed: ${err}</p>`;
+    console.error(err);
+  }
+}
+
+function showPlayer(url, title) {
+  // Hide other sections, show a full-screen video player
+  $catalogSection.classList.add("hidden");
+  $detailSection.classList.add("hidden");
+
+  let $player = document.getElementById("player-section");
+  if (!$player) {
+    $player = document.createElement("section");
+    $player.id = "player-section";
+    document.querySelector("main").appendChild($player);
+  }
+
+  $player.innerHTML = `
+    <div class="player-card">
+      <div class="player-header">
+        <button id="player-back" class="btn-secondary btn-small">Back</button>
+        <span class="player-title">${title}</span>
+      </div>
+      <video
+        id="player-video"
+        controls
+        autoplay
+        playsinline
+        class="player-video"
+      >
+        <source src="${url}" />
+        Your browser does not support video playback.
+      </video>
+      <div id="player-error" class="hidden"></div>
+    </div>
+  `;
+  $player.classList.remove("hidden");
+
+  const video = document.getElementById("player-video");
+  const errorEl = document.getElementById("player-error");
+
+  video.addEventListener("error", () => {
+    const code = video.error?.code;
+    const msg = video.error?.message || "Unknown error";
+    errorEl.textContent = `Playback error (code ${code}): ${msg}. The source URL may have expired or the format may not be supported by your browser.`;
+    errorEl.className = "player-error-msg";
+  });
+
+  document.getElementById("player-back").addEventListener("click", () => {
+    video.pause();
+    video.src = "";
+    $player.classList.add("hidden");
+    $detailSection.classList.remove("hidden");
+  });
 }
 
 // ---------------------------------------------------------------------------

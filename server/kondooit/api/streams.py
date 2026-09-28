@@ -22,6 +22,29 @@ logger = logging.getLogger(__name__)
 class StreamController(Controller):
     path = "/streams"
 
+    @get("/{stream_id:str}/direct-url")
+    async def get_direct_url(
+        self,
+        stream_id: str,
+        stream_store: StreamHandleStore,
+    ) -> dict:
+        """Return the upstream URL for a stream handle.
+
+        Used by remote clients that can reach the upstream provider
+        directly (e.g. public CDN links from Debrid services) without
+        proxying through this server.
+        """
+        handle = stream_store.get(stream_id)
+        if handle is None:
+            raise NotFoundException("Stream not found or expired")
+        return {
+            "stream_id": stream_id,
+            "url": handle.upstream_url,
+            "content_type": handle.content_type,
+            "filename": handle.filename,
+            "has_auth": handle.upstream_auth is not None,
+        }
+
     @get("/{stream_id:str}")
     async def stream_proxy(
         self,

@@ -639,6 +639,77 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   margin-top: 0.5rem;
 }
 
+/* --- Player --- */
+
+.player-card {
+  background: #000;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.player-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--bg-card);
+}
+
+.player-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.player-video {
+  width: 100%;
+  max-height: 70vh;
+  display: block;
+  background: #000;
+}
+
+.player-error-msg {
+  padding: 1rem;
+  color: var(--error);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+/* --- Source badges --- */
+
+.source-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.source-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: var(--bg-card-alt);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.source-badge.quality { color: var(--accent); border-color: var(--accent); }
+.source-badge.cached { color: var(--success); border-color: var(--success); }
+.source-badge.direct { color: var(--success); border-color: var(--success); }
+.source-badge.compat-good { color: var(--success); border-color: var(--success); }
+.source-badge.compat-ok { color: #38bdf8; border-color: #38bdf8; }
+
+.source-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-shrink: 0;
+}
+
 /* --- Utility --- */
 
 .hidden { display: none !important; }
