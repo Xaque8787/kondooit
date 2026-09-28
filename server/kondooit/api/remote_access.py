@@ -30,7 +30,7 @@ class ConnectionUrlResponse(BaseModel):
 
 
 class RemoteAccessController(Controller):
-    path = "/api/remote-access"
+    path = "/remote-access"
     tags = ["Remote Access"]
     guards = [jwt_guard]
 
