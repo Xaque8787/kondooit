@@ -72,8 +72,6 @@ class IrohSidecar:
             "--data-dir", self._data_dir,
             "--target-port", str(self._target_port),
             "--control-socket", self._control_socket,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
         )
         logger.info("Sidecar started (pid=%s)", self._process.pid)
 
