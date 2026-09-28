@@ -36,21 +36,21 @@ impl KondooitConnection {
 
     /// Connect to a remote Kondooit server by its endpoint ID (public key).
     ///
-    /// The `endpoint_id` is the hex-encoded iroh `NodeId`. Since browsers are
+    /// The `endpoint_id` is the hex-encoded iroh `EndpointId`. Since browsers are
     /// relay-only, the connection flows through an iroh relay server and is
     /// end-to-end encrypted.
     pub async fn connect(
         &self,
         endpoint_id: &str,
     ) -> Result<iroh::endpoint::Connection, ConnectError> {
-        let node_id: iroh_base::NodeId = endpoint_id
+        let peer_id: iroh::EndpointId = endpoint_id
             .trim()
             .parse()
             .map_err(|e| ConnectError::InvalidEndpointId(format!("{e}")))?;
 
-        let addr = iroh::EndpointAddr::from(node_id);
+        let addr = iroh::EndpointAddr::from(peer_id);
 
-        tracing::info!(%node_id, "connecting to server…");
+        tracing::info!(%peer_id, "connecting to server…");
 
         let conn = self
             .endpoint
@@ -58,7 +58,7 @@ impl KondooitConnection {
             .await
             .map_err(|e| ConnectError::Connection(format!("{e}")))?;
 
-        tracing::info!(%node_id, "connected");
+        tracing::info!(%peer_id, "connected");
         Ok(conn)
     }
 
