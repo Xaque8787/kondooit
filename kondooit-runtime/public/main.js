@@ -146,7 +146,7 @@ function setupLogin() {
         body: JSON.stringify({ username, password }),
       });
 
-      if (resp.status === 200 && resp.json?.access_token) {
+      if (resp.status >= 200 && resp.status < 300 && resp.json?.access_token) {
         authToken = resp.json.access_token;
         localStorage.setItem(TOKEN_KEY, authToken);
         $loginSection.classList.add("hidden");
