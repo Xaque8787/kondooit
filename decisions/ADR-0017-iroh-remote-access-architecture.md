@@ -1,6 +1,6 @@
 # ADR-0017: iroh remote access architecture — sidecar endpoint, browser runtime, and delivery modes
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-28
 - **Supersedes:** —
 - **Superseded by:** —
