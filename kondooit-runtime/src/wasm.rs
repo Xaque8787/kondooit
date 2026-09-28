@@ -1,38 +1,26 @@
-//! wasm-bindgen wrapper — exposes `KondooitRuntime` to JavaScript.
-//!
-//! Structure mirrors the `browser-echo` / `wasm-gui` examples from iroh-examples:
-//! a `#[wasm_bindgen(start)]` init hook plus an exported struct that JS drives.
-//!
-//! Browsers cannot open raw UDP/QUIC sockets, so this endpoint reaches peers
-//! exclusively over a **relay** (the iroh `N0` preset wires up the n0 relays).
-//! All connections are end-to-end encrypted regardless.
+//! wasm-bindgen wrapper -- exposes `KondooitRuntime` to JavaScript.
 
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber_wasm::MakeConsoleWriter;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
-use crate::{KondooitConnection, ALPN};
+use crate::{KondooitConnection, ALPN, STREAM_TYPE_HTTP};
 
 // ---------------------------------------------------------------------------
-// Module init — runs once when the WASM module is loaded
+// Module init
 // ---------------------------------------------------------------------------
 
-/// Runs automatically when the WASM module is instantiated in the browser.
-/// Sets up panic hooks and tracing → browser console.
 #[wasm_bindgen(start)]
 fn start() {
-    // Readable panics in the console instead of an opaque wasm trap.
     console_error_panic_hook::set_once();
 
-    // Route `tracing` (including iroh's internal logs) to the browser console.
     tracing_subscriber::fmt()
         .with_max_level(LevelFilter::INFO)
         .with_writer(
-            // Map TRACE down so the browser doesn't attach a JS backtrace to every line.
             MakeConsoleWriter::default().map_trace_level_to(tracing::Level::DEBUG),
         )
-        .without_time() // wall-clock time isn't available the usual way in wasm
+        .without_time()
         .with_ansi(false)
         .init();
 
@@ -43,22 +31,16 @@ fn start() {
 // KondooitRuntime — the JS-facing API
 // ---------------------------------------------------------------------------
 
-/// A Kondooit runtime running in the browser, backed by an iroh endpoint.
 #[wasm_bindgen]
 pub struct KondooitRuntime {
     connection: KondooitConnection,
-    /// Hex-encoded secret key so JS can persist it (localStorage) for a stable
-    /// identity across reloads.
     secret_hex: String,
+    /// Cached server endpoint ID after a successful connect().
+    server_endpoint_id: Option<String>,
 }
 
 #[wasm_bindgen]
 impl KondooitRuntime {
-    /// Spawn a new iroh endpoint (the browser's Kondooit runtime).
-    ///
-    /// `secret` is an optional hex-encoded iroh secret key. Pass the one persisted
-    /// from a previous session to keep a stable endpoint ID; pass `null`/`undefined`
-    /// to generate a fresh identity (then read it back via `secret_hex()`).
     pub async fn spawn(secret: Option<String>) -> Result<KondooitRuntime, JsError> {
         let secret_key = match secret
             .as_deref()
@@ -83,41 +65,36 @@ impl KondooitRuntime {
         Ok(KondooitRuntime {
             connection: KondooitConnection::new(endpoint),
             secret_hex,
+            server_endpoint_id: None,
         })
     }
 
-    /// The endpoint's ID (its public key, hex-encoded).
-    /// Available immediately after `spawn` — derived from the secret key,
-    /// not from any relay connection.
     pub fn endpoint_id(&self) -> String {
         self.connection.endpoint().id().to_string()
     }
 
-    /// The endpoint's secret key, hex-encoded — persist this to reuse the same
-    /// identity next time. Treat it like a private key.
     pub fn secret_hex(&self) -> String {
         self.secret_hex.clone()
     }
 
     /// Connect to a remote Kondooit server by endpoint ID.
-    ///
-    /// Returns a `Promise<true>` — resolves on success, rejects on failure.
-    /// The endpoint ID is the server sidecar's iroh public key (hex string).
-    pub fn connect(&self, endpoint_id: String) -> js_sys::Promise {
-        // Clone the connection's endpoint so the future is 'static (can't
-        // borrow &self across an await in an exported wasm_bindgen method).
-        let connection = KondooitConnection::new(self.connection.endpoint().clone());
+    /// Caches the server ID for subsequent http_fetch / ping calls.
+    pub fn connect(&mut self, endpoint_id: String) -> js_sys::Promise {
+        let ep = self.connection.endpoint().clone();
+        let id_clone = endpoint_id.clone();
+        // We can't borrow &mut self across async, so use a channel-like pattern.
+        // Instead, we'll set server_endpoint_id before the async block.
+        self.server_endpoint_id = Some(endpoint_id.clone());
+
+        let connection = KondooitConnection::new(ep);
         future_to_promise(async move {
-            let conn = connection.connect(&endpoint_id).await.map_err(js_err)?;
-            // For now, just confirm the connection succeeded and close cleanly.
+            let conn = connection.connect(&id_clone).await.map_err(js_err)?;
             conn.close(0u32.into(), b"ok");
             Ok(JsValue::TRUE)
         })
     }
 
-    /// MVP test: open a bidi stream, send "PING\n", return the response.
-    ///
-    /// Returns a `Promise<string>` that resolves with the server's reply.
+    /// MVP test: open a control bidi stream, send "PING\n", return the response.
     pub fn ping(&self, endpoint_id: String) -> js_sys::Promise {
         let connection = KondooitConnection::new(self.connection.endpoint().clone());
         future_to_promise(async move {
@@ -127,18 +104,134 @@ impl KondooitRuntime {
             }
         })
     }
+
+    /// Send an HTTP request through the iroh tunnel and return the raw response.
+    ///
+    /// `method` — HTTP method (GET, POST, etc.)
+    /// `path` — request path (e.g. "/auth/login")
+    /// `headers_json` — JSON-encoded array of [key, value] pairs
+    /// `body` — optional request body string
+    ///
+    /// Returns a JSON string: { "status": 200, "headers": {...}, "body": "..." }
+    pub fn http_fetch(
+        &self,
+        method: String,
+        path: String,
+        headers_json: String,
+        body: Option<String>,
+    ) -> js_sys::Promise {
+        let endpoint_id = self.server_endpoint_id.clone();
+        let connection = KondooitConnection::new(self.connection.endpoint().clone());
+
+        future_to_promise(async move {
+            let server_id = endpoint_id
+                .ok_or_else(|| js_err("not connected — call connect() first"))?;
+
+            let conn = connection.connect(&server_id).await.map_err(js_err)?;
+
+            let (mut send, mut recv) = conn
+                .open_bi()
+                .await
+                .map_err(|e| js_err(format!("open_bi failed: {e}")))?;
+
+            // Write HTTP stream-type prefix
+            send.write_all(&[STREAM_TYPE_HTTP])
+                .await
+                .map_err(|e| js_err(format!("write prefix: {e}")))?;
+
+            // Build a raw HTTP/1.1 request
+            let body_bytes = body.as_deref().unwrap_or("");
+            let mut request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n");
+
+            // Parse custom headers
+            if let Ok(pairs) = serde_json::from_str::<Vec<(String, String)>>(&headers_json) {
+                for (k, v) in &pairs {
+                    request.push_str(&format!("{k}: {v}\r\n"));
+                }
+            }
+
+            if !body_bytes.is_empty() {
+                request.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
+            }
+            request.push_str("Connection: close\r\n\r\n");
+            request.push_str(body_bytes);
+
+            send.write_all(request.as_bytes())
+                .await
+                .map_err(|e| js_err(format!("write request: {e}")))?;
+            send.finish()
+                .map_err(|e| js_err(format!("finish: {e}")))?;
+
+            // Read the full HTTP response
+            let mut response_buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            while let Some(n) = recv
+                .read(&mut chunk)
+                .await
+                .map_err(|e| js_err(format!("read: {e}")))?
+            {
+                response_buf.extend_from_slice(&chunk[..n]);
+            }
+
+            conn.close(0u32.into(), b"done");
+
+            let raw = String::from_utf8_lossy(&response_buf).into_owned();
+
+            // Parse the HTTP response into a structured JSON result
+            let result = parse_http_response(&raw);
+            Ok(JsValue::from_str(&result))
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP response parsing
+// ---------------------------------------------------------------------------
+
+fn parse_http_response(raw: &str) -> String {
+    // Split headers from body at the first \r\n\r\n
+    let (header_section, body) = match raw.find("\r\n\r\n") {
+        Some(pos) => (&raw[..pos], &raw[pos + 4..]),
+        None => (raw, ""),
+    };
+
+    let mut lines = header_section.lines();
+
+    // Parse status line
+    let status: u16 = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    // Parse headers into a JSON object
+    let mut headers = serde_json::Map::new();
+    for line in lines {
+        if let Some((key, value)) = line.split_once(':') {
+            headers.insert(
+                key.trim().to_lowercase(),
+                serde_json::Value::String(value.trim().to_string()),
+            );
+        }
+    }
+
+    let result = serde_json::json!({
+        "status": status,
+        "headers": headers,
+        "body": body,
+    });
+
+    result.to_string()
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Wrap any `Display` error as a `JsError` for the JS boundary.
 fn js_err(err: impl std::fmt::Display) -> JsError {
     JsError::new(&err.to_string())
 }
 
-/// Lowercase hex encoding (matches the format iroh CLIs use for secret keys).
 fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {

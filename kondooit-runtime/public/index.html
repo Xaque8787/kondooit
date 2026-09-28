@@ -10,22 +10,23 @@
   <main>
     <header>
       <h1>Kondooit</h1>
-      <p class="subtitle">Secure tunnel runtime</p>
+      <p class="subtitle">Remote access</p>
     </header>
 
+    <!-- Connection status steps -->
     <section id="status-section">
       <div class="status-steps">
         <div class="step" id="step-loading" data-status="pending">
           <span class="step-icon"></span>
-          <span class="step-label">Loading runtime…</span>
+          <span class="step-label">Loading runtime...</span>
         </div>
         <div class="step" id="step-endpoint" data-status="pending">
           <span class="step-icon"></span>
-          <span class="step-label">Creating endpoint…</span>
+          <span class="step-label">Creating endpoint...</span>
         </div>
         <div class="step" id="step-connecting" data-status="pending">
           <span class="step-icon"></span>
-          <span class="step-label">Connecting to server…</span>
+          <span class="step-label">Connecting to server...</span>
         </div>
         <div class="step" id="step-connected" data-status="pending">
           <span class="step-icon"></span>
@@ -34,28 +35,106 @@
       </div>
     </section>
 
+    <!-- Connection info -->
     <section id="info-section" class="hidden">
       <div class="info-card">
         <div class="info-row">
           <span class="info-label">Your endpoint</span>
-          <code id="local-endpoint-id" class="mono">—</code>
+          <code id="local-endpoint-id" class="mono">--</code>
         </div>
         <div class="info-row">
           <span class="info-label">Server endpoint</span>
-          <code id="server-endpoint-id" class="mono">—</code>
+          <code id="server-endpoint-id" class="mono">--</code>
         </div>
         <div class="info-row">
           <span class="info-label">Status</span>
-          <span id="connection-status">—</span>
+          <span id="connection-status">--</span>
         </div>
       </div>
     </section>
 
+    <!-- Ping test -->
     <section id="ping-section" class="hidden">
       <button id="ping-btn" type="button">Send PING</button>
       <div id="ping-result" class="mono"></div>
     </section>
 
+    <!-- Login form -->
+    <section id="login-section" class="hidden">
+      <div class="login-card">
+        <h2>Sign in to your server</h2>
+        <p class="login-hint">Use your Kondooit account credentials.</p>
+        <form id="login-form">
+          <div class="form-field">
+            <label for="login-username">Username</label>
+            <input type="text" id="login-username" autocomplete="username" required />
+          </div>
+          <div class="form-field">
+            <label for="login-password">Password</label>
+            <input type="password" id="login-password" autocomplete="current-password" required />
+          </div>
+          <div id="login-error" class="form-error hidden"></div>
+          <button type="submit" id="login-btn">Sign In</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- Authenticated user info -->
+    <section id="user-section" class="hidden">
+      <div class="user-card">
+        <div class="user-header">
+          <div class="user-avatar" id="user-avatar"></div>
+          <div>
+            <div class="user-name" id="user-name"></div>
+            <div class="user-role" id="user-role"></div>
+          </div>
+          <button id="logout-btn" class="btn-secondary btn-small">Sign Out</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Catalog browser -->
+    <section id="catalog-section" class="hidden">
+      <div class="catalog-header">
+        <h2>Your Library</h2>
+        <div class="catalog-tabs">
+          <button class="tab active" data-tab="movies">Movies</button>
+          <button class="tab" data-tab="series">Series</button>
+          <button class="tab" data-tab="discover">Discover</button>
+        </div>
+      </div>
+      <div id="catalog-content" class="catalog-grid"></div>
+      <div id="catalog-empty" class="catalog-empty hidden">
+        No content found. Add content from the Discover tab or from your server.
+      </div>
+      <div id="catalog-loading" class="catalog-loading hidden">
+        <div class="spinner"></div>
+      </div>
+    </section>
+
+    <!-- Content detail overlay -->
+    <section id="detail-section" class="hidden">
+      <div class="detail-card">
+        <button id="detail-back" class="btn-secondary btn-small">Back</button>
+        <div id="detail-backdrop" class="detail-backdrop"></div>
+        <div class="detail-body">
+          <img id="detail-poster" class="detail-poster" alt="" />
+          <div class="detail-info">
+            <h2 id="detail-title"></h2>
+            <div class="detail-meta">
+              <span id="detail-year"></span>
+              <span id="detail-runtime"></span>
+              <span id="detail-rating"></span>
+            </div>
+            <p id="detail-overview" class="detail-overview"></p>
+            <div id="detail-genres" class="detail-genres"></div>
+            <div id="detail-actions" class="detail-actions"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Error display -->
     <section id="error-section" class="hidden">
       <div class="error-card">
         <h2>Connection Error</h2>

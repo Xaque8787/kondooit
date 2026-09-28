@@ -14,6 +14,10 @@ pub mod wasm;
 /// This MUST match the ALPN used by the server-side sidecar.
 pub const ALPN: &[u8] = b"kondooit/tunnel/0";
 
+/// Stream-type prefixes (first byte of every bidi stream).
+pub const STREAM_TYPE_HTTP: u8 = 0x00;
+pub const STREAM_TYPE_CONTROL: u8 = 0x01;
+
 // ---------------------------------------------------------------------------
 // KondooitConnection
 // ---------------------------------------------------------------------------
@@ -35,10 +39,6 @@ impl KondooitConnection {
     }
 
     /// Connect to a remote Kondooit server by its endpoint ID (public key).
-    ///
-    /// The `endpoint_id` is the hex-encoded iroh `EndpointId`. Since browsers are
-    /// relay-only, the connection flows through an iroh relay server and is
-    /// end-to-end encrypted.
     pub async fn connect(
         &self,
         endpoint_id: &str,
@@ -50,7 +50,7 @@ impl KondooitConnection {
 
         let addr = iroh::EndpointAddr::from(peer_id);
 
-        tracing::info!(%peer_id, "connecting to server…");
+        tracing::info!(%peer_id, "connecting to server...");
 
         let conn = self
             .endpoint
@@ -62,9 +62,7 @@ impl KondooitConnection {
         Ok(conn)
     }
 
-    /// MVP test: open a bidi stream, write "PING\n", read the response.
-    ///
-    /// Returns whatever the server sends back (expected: "PONG\n").
+    /// MVP test: open a control bidi stream, write "PING\n", read the response.
     pub async fn ping(
         &self,
         endpoint_id: &str,
@@ -76,16 +74,18 @@ impl KondooitConnection {
             .await
             .map_err(|e| ConnectError::Stream(format!("{e}")))?;
 
-        // Send PING
+        // Write the control stream-type prefix, then the PING payload
+        send.write_all(&[STREAM_TYPE_CONTROL])
+            .await
+            .map_err(|e| ConnectError::Stream(format!("{e}")))?;
         send.write_all(b"PING\n")
             .await
             .map_err(|e| ConnectError::Stream(format!("{e}")))?;
         send.finish()
             .map_err(|e| ConnectError::Stream(format!("{e}")))?;
 
-        tracing::info!("sent PING");
+        tracing::info!("sent PING (control stream)");
 
-        // Read response until the server closes its send side
         let mut buf = Vec::new();
         let mut chunk = [0u8; 1024];
         while let Some(n) = recv
@@ -104,6 +104,24 @@ impl KondooitConnection {
         tracing::info!(response = %response.trim(), "received response");
         Ok(response)
     }
+
+    /// Open an HTTP-tunneled bidi stream to the server.
+    /// Returns (send, recv) with the HTTP prefix already written.
+    pub async fn open_http_stream(
+        &self,
+        conn: &iroh::endpoint::Connection,
+    ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream), ConnectError> {
+        let (mut send, recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| ConnectError::Stream(format!("{e}")))?;
+
+        send.write_all(&[STREAM_TYPE_HTTP])
+            .await
+            .map_err(|e| ConnectError::Stream(format!("{e}")))?;
+
+        Ok((send, recv))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,13 +131,9 @@ impl KondooitConnection {
 /// Errors that can occur when connecting to a Kondooit server.
 #[derive(Debug)]
 pub enum ConnectError {
-    /// The endpoint ID string could not be parsed.
     InvalidEndpointId(String),
-    /// The iroh connection failed.
     Connection(String),
-    /// A stream operation (open/read/write) failed.
     Stream(String),
-    /// Protocol-level error (unexpected data, encoding, etc.).
     Protocol(String),
 }
 
