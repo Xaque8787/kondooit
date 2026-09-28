@@ -1,11 +1,14 @@
 //! wasm-bindgen wrapper -- exposes `KondooitRuntime` to JavaScript.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber_wasm::MakeConsoleWriter;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
-use crate::{KondooitConnection, ALPN, STREAM_TYPE_HTTP};
+use crate::{KondooitConnection, ALPN, STREAM_TYPE_CONTROL, STREAM_TYPE_HTTP};
 
 // ---------------------------------------------------------------------------
 // Module init
@@ -28,15 +31,21 @@ fn start() {
 }
 
 // ---------------------------------------------------------------------------
+// Shared persistent connection (single-threaded WASM — RefCell is fine)
+// ---------------------------------------------------------------------------
+
+type SharedConn = Rc<RefCell<Option<iroh::endpoint::Connection>>>;
+
+// ---------------------------------------------------------------------------
 // KondooitRuntime — the JS-facing API
 // ---------------------------------------------------------------------------
 
 #[wasm_bindgen]
 pub struct KondooitRuntime {
-    connection: KondooitConnection,
+    endpoint: iroh::Endpoint,
     secret_hex: String,
-    /// Cached server endpoint ID after a successful connect().
     server_endpoint_id: Option<String>,
+    persistent_conn: SharedConn,
 }
 
 #[wasm_bindgen]
@@ -63,14 +72,15 @@ impl KondooitRuntime {
         tracing::info!(id = %endpoint.id(), "endpoint bound");
 
         Ok(KondooitRuntime {
-            connection: KondooitConnection::new(endpoint),
+            endpoint,
             secret_hex,
             server_endpoint_id: None,
+            persistent_conn: Rc::new(RefCell::new(None)),
         })
     }
 
     pub fn endpoint_id(&self) -> String {
-        self.connection.endpoint().id().to_string()
+        self.endpoint.id().to_string()
     }
 
     pub fn secret_hex(&self) -> String {
@@ -78,39 +88,67 @@ impl KondooitRuntime {
     }
 
     /// Connect to a remote Kondooit server by endpoint ID.
-    /// Caches the server ID for subsequent http_fetch / ping calls.
+    /// Establishes a persistent connection reused by ping() and http_fetch().
     pub fn connect(&mut self, endpoint_id: String) -> js_sys::Promise {
-        let ep = self.connection.endpoint().clone();
-        let id_clone = endpoint_id.clone();
-        // We can't borrow &mut self across async, so use a channel-like pattern.
-        // Instead, we'll set server_endpoint_id before the async block.
         self.server_endpoint_id = Some(endpoint_id.clone());
 
-        let connection = KondooitConnection::new(ep);
+        let ep = self.endpoint.clone();
+        let persistent = self.persistent_conn.clone();
+
         future_to_promise(async move {
-            let conn = connection.connect(&id_clone).await.map_err(js_err)?;
-            conn.close(0u32.into(), b"ok");
+            tracing::info!("connect: establishing persistent connection");
+            let helper = KondooitConnection::new(ep);
+            let conn = helper.connect(&endpoint_id).await.map_err(js_err)?;
+            tracing::info!("connect: persistent connection established");
+
+            *persistent.borrow_mut() = Some(conn);
             Ok(JsValue::TRUE)
         })
     }
 
     /// MVP test: open a control bidi stream, send "PING\n", return the response.
-    pub fn ping(&self, endpoint_id: String) -> js_sys::Promise {
-        let connection = KondooitConnection::new(self.connection.endpoint().clone());
+    pub fn ping(&self, _endpoint_id: String) -> js_sys::Promise {
+        let persistent = self.persistent_conn.clone();
+        let endpoint = self.endpoint.clone();
+        let server_id = self.server_endpoint_id.clone();
+
         future_to_promise(async move {
-            match connection.ping(&endpoint_id).await {
-                Ok(response) => Ok(JsValue::from_str(&response)),
-                Err(err) => Err(js_err(err).into()),
+            let conn = get_or_reconnect(&persistent, &endpoint, server_id.as_deref()).await?;
+
+            let (mut send, mut recv) = conn
+                .open_bi()
+                .await
+                .map_err(|e| js_err(format!("open_bi failed: {e}")))?;
+
+            send.write_all(&[STREAM_TYPE_CONTROL])
+                .await
+                .map_err(|e| js_err(format!("write: {e}")))?;
+            send.write_all(b"PING\n")
+                .await
+                .map_err(|e| js_err(format!("write: {e}")))?;
+            send.finish()
+                .map_err(|e| js_err(format!("finish: {e}")))?;
+
+            tracing::info!("ping: sent PING");
+
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while let Some(n) = recv
+                .read(&mut chunk)
+                .await
+                .map_err(|e| js_err(format!("read: {e}")))?
+            {
+                buf.extend_from_slice(&chunk[..n]);
             }
+
+            let response = String::from_utf8(buf)
+                .map_err(|e| js_err(format!("invalid UTF-8: {e}")))?;
+            tracing::info!(response = %response.trim(), "ping: received response");
+            Ok(JsValue::from_str(&response))
         })
     }
 
     /// Send an HTTP request through the iroh tunnel and return the raw response.
-    ///
-    /// `method` — HTTP method (GET, POST, etc.)
-    /// `path` — request path (e.g. "/auth/login")
-    /// `headers_json` — JSON-encoded array of [key, value] pairs
-    /// `body` — optional request body string
     ///
     /// Returns a JSON string: { "status": 200, "headers": {...}, "body": "..." }
     pub fn http_fetch(
@@ -120,19 +158,22 @@ impl KondooitRuntime {
         headers_json: String,
         body: Option<String>,
     ) -> js_sys::Promise {
-        let endpoint_id = self.server_endpoint_id.clone();
-        let connection = KondooitConnection::new(self.connection.endpoint().clone());
+        let persistent = self.persistent_conn.clone();
+        let endpoint = self.endpoint.clone();
+        let server_id = self.server_endpoint_id.clone();
 
         future_to_promise(async move {
-            let server_id = endpoint_id
-                .ok_or_else(|| js_err("not connected — call connect() first"))?;
+            tracing::info!("http_fetch: {method} {path}");
 
-            let conn = connection.connect(&server_id).await.map_err(js_err)?;
+            let conn = get_or_reconnect(&persistent, &endpoint, server_id.as_deref()).await?;
 
             let (mut send, mut recv) = conn
                 .open_bi()
                 .await
-                .map_err(|e| js_err(format!("open_bi failed: {e}")))?;
+                .map_err(|e| {
+                    tracing::error!("http_fetch: open_bi failed: {e}");
+                    js_err(format!("open_bi failed: {e}"))
+                })?;
 
             // Write HTTP stream-type prefix
             send.write_all(&[STREAM_TYPE_HTTP])
@@ -143,7 +184,6 @@ impl KondooitRuntime {
             let body_bytes = body.as_deref().unwrap_or("");
             let mut request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n");
 
-            // Parse custom headers
             if let Ok(pairs) = serde_json::from_str::<Vec<(String, String)>>(&headers_json) {
                 for (k, v) in &pairs {
                     request.push_str(&format!("{k}: {v}\r\n"));
@@ -156,6 +196,7 @@ impl KondooitRuntime {
             request.push_str("Connection: close\r\n\r\n");
             request.push_str(body_bytes);
 
+            tracing::info!("http_fetch: sending {} byte request", request.len());
             send.write_all(request.as_bytes())
                 .await
                 .map_err(|e| js_err(format!("write request: {e}")))?;
@@ -165,19 +206,34 @@ impl KondooitRuntime {
             // Read the full HTTP response
             let mut response_buf = Vec::new();
             let mut chunk = [0u8; 8192];
-            while let Some(n) = recv
-                .read(&mut chunk)
-                .await
-                .map_err(|e| js_err(format!("read: {e}")))?
-            {
-                response_buf.extend_from_slice(&chunk[..n]);
+            let mut read_count = 0u32;
+            loop {
+                match recv.read(&mut chunk).await {
+                    Ok(Some(n)) => {
+                        read_count += 1;
+                        response_buf.extend_from_slice(&chunk[..n]);
+                    }
+                    Ok(None) => {
+                        tracing::info!(
+                            "http_fetch: stream finished, {read_count} reads, {} bytes",
+                            response_buf.len()
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "http_fetch: read error after {read_count} reads ({} bytes): {e}",
+                            response_buf.len()
+                        );
+                        if response_buf.is_empty() {
+                            return Err(js_err(format!("read error: {e}")).into());
+                        }
+                        break;
+                    }
+                }
             }
 
-            conn.close(0u32.into(), b"done");
-
             let raw = String::from_utf8_lossy(&response_buf).into_owned();
-
-            // Parse the HTTP response into a structured JSON result
             let result = parse_http_response(&raw);
             Ok(JsValue::from_str(&result))
         })
@@ -185,11 +241,40 @@ impl KondooitRuntime {
 }
 
 // ---------------------------------------------------------------------------
+// Persistent connection helper
+// ---------------------------------------------------------------------------
+
+async fn get_or_reconnect(
+    persistent: &SharedConn,
+    endpoint: &iroh::Endpoint,
+    server_id: Option<&str>,
+) -> Result<iroh::endpoint::Connection, JsValue> {
+    // Take a clone of the current connection (if any) without holding the borrow
+    let existing = persistent.borrow().clone();
+
+    if let Some(ref conn) = existing {
+        if conn.close_reason().is_none() {
+            return Ok(conn.clone());
+        }
+        tracing::warn!("persistent connection closed, reconnecting");
+    }
+
+    let sid = server_id.ok_or_else(|| js_err("not connected — call connect() first"))?;
+    let helper = KondooitConnection::new(endpoint.clone());
+    let conn = helper.connect(sid).await.map_err(|e| {
+        tracing::error!("reconnect failed: {e}");
+        js_err(e)
+    })?;
+    tracing::info!("reconnected to server");
+    *persistent.borrow_mut() = Some(conn.clone());
+    Ok(conn)
+}
+
+// ---------------------------------------------------------------------------
 // HTTP response parsing
 // ---------------------------------------------------------------------------
 
 fn parse_http_response(raw: &str) -> String {
-    // Split headers from body at the first \r\n\r\n
     let (header_section, body) = match raw.find("\r\n\r\n") {
         Some(pos) => (&raw[..pos], &raw[pos + 4..]),
         None => (raw, ""),
@@ -197,14 +282,12 @@ fn parse_http_response(raw: &str) -> String {
 
     let mut lines = header_section.lines();
 
-    // Parse status line
     let status: u16 = lines
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    // Parse headers into a JSON object
     let mut headers = serde_json::Map::new();
     let mut is_chunked = false;
     for line in lines {
@@ -238,7 +321,6 @@ fn decode_chunked(raw: &str) -> String {
     let mut remaining = raw;
 
     loop {
-        // Find the chunk size line
         let size_end = match remaining.find("\r\n") {
             Some(pos) => pos,
             None => break,
@@ -256,14 +338,12 @@ fn decode_chunked(raw: &str) -> String {
         let data_start = size_end + 2;
         let data_end = data_start + chunk_size;
         if data_end > remaining.len() {
-            // Partial chunk -- take what we can
             result.push_str(&remaining[data_start..]);
             break;
         }
 
         result.push_str(&remaining[data_start..data_end]);
 
-        // Skip past chunk data + trailing \r\n
         let next = data_end + 2;
         if next >= remaining.len() {
             break;
