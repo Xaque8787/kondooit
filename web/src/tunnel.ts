@@ -37,6 +37,8 @@ let serverEndpointId: string | null = null;
 let connectionPromise: Promise<void> | null = null;
 let tunnelModeActivated = false;
 
+const SERVER_ID_KEY = "kondooit_tunnel_server_id";
+
 // ---------------------------------------------------------------------------
 // Bootstrap payload parsing (matches server's connection_url format)
 // ---------------------------------------------------------------------------
@@ -71,18 +73,29 @@ function parseBootstrapPayload(): BootstrapPayload | null {
 // Public API
 // ---------------------------------------------------------------------------
 
-export function isTunnelMode(): boolean {
-  if (tunnelModeActivated) return true;
+function captureServerIdFromFragment(): void {
   const payload = parseBootstrapPayload();
   if (payload) {
+    sessionStorage.setItem(SERVER_ID_KEY, payload.endpoint_id);
+    tunnelModeActivated = true;
+  }
+}
+
+captureServerIdFromFragment();
+
+export function isTunnelMode(): boolean {
+  if (tunnelModeActivated) return true;
+  if (sessionStorage.getItem(SERVER_ID_KEY)) {
     tunnelModeActivated = true;
     return true;
   }
   return false;
 }
 
-export function getTunnelServerIdFromUrl(): string | null {
-  return parseBootstrapPayload()?.endpoint_id ?? null;
+export function getTunnelServerId(): string | null {
+  const payload = parseBootstrapPayload();
+  if (payload) return payload.endpoint_id;
+  return sessionStorage.getItem(SERVER_ID_KEY);
 }
 
 export type TunnelStatus =

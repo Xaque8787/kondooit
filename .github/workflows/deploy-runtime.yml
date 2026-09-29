@@ -64,8 +64,9 @@ jobs:
           mkdir -p _site/runtime/wasm
           cp kondooit-runtime/wasm-out/* _site/runtime/wasm/
 
-          # SPA fallback: all routes serve index.html (GitHub Pages 404 trick)
-          cp _site/runtime/index.html _site/runtime/404.html
+          # SPA fallback: GitHub Pages serves 404.html for unknown paths.
+          # It must be at the repo root so it covers /runtime/* sub-paths.
+          cp _site/runtime/index.html _site/404.html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

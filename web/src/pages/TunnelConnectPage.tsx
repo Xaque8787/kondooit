@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  getTunnelServerIdFromUrl,
+  getTunnelServerId,
   initTunnel,
   type TunnelStatus,
   onTunnelStatus,
@@ -21,7 +21,7 @@ export function TunnelConnectPage() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    const serverId = getTunnelServerIdFromUrl();
+    const serverId = getTunnelServerId();
     if (!serverId) {
       setStatus({ phase: "error", message: "No server ID provided in URL." });
       return;
