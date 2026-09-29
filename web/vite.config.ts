@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig(({ mode }) => ({
   plugins: [react()],
-  base: mode === "runtime" ? "/runtime/" : "/",
+  base: mode === "runtime" ? "/kondooit/runtime/" : "/",
   server: {
     port: 5173,
     proxy: {

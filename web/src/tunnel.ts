@@ -1,14 +1,13 @@
 /**
- * Tunnel transport — loads the WASM runtime on demand and routes
+ * Tunnel transport -- loads the WASM runtime on demand and routes
  * API calls through the iroh tunnel when in remote mode.
  *
- * Local mode: this module is never loaded (tree-shaken away).
- * Remote mode: detected via ?tunnel=<server_endpoint_id> in the URL.
+ * Local mode: this module is inert; isTunnelMode() returns false.
+ * Remote mode: detected via a URL fragment (#base64payload) containing
+ * the server endpoint ID, matching the connection URL format the server
+ * generates.
  */
 
-// The WASM module is loaded dynamically at runtime from /wasm/
-// (placed there by the deployment build). These types mirror the
-// wasm-bindgen interface from kondooit-runtime/src/wasm.rs.
 interface KondooitRuntime {
   endpoint_id(): string;
   secret_hex(): string;
@@ -39,18 +38,51 @@ let connectionPromise: Promise<void> | null = null;
 let tunnelModeActivated = false;
 
 // ---------------------------------------------------------------------------
+// Bootstrap payload parsing (matches server's connection_url format)
+// ---------------------------------------------------------------------------
+
+function base64urlDecode(str: string): string {
+  let b64 = str.replace(/-/g, "+").replace(/_/g, "/");
+  while (b64.length % 4 !== 0) b64 += "=";
+  return atob(b64);
+}
+
+interface BootstrapPayload {
+  v: number;
+  endpoint_id: string;
+}
+
+function parseBootstrapPayload(): BootstrapPayload | null {
+  const fragment = window.location.hash.slice(1);
+  if (!fragment) return null;
+  try {
+    const json = base64urlDecode(fragment);
+    const payload = JSON.parse(json) as BootstrapPayload;
+    if (!payload.endpoint_id || typeof payload.endpoint_id !== "string") {
+      return null;
+    }
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 export function isTunnelMode(): boolean {
   if (tunnelModeActivated) return true;
-  const has = new URLSearchParams(window.location.search).has("tunnel");
-  if (has) tunnelModeActivated = true;
-  return has;
+  const payload = parseBootstrapPayload();
+  if (payload) {
+    tunnelModeActivated = true;
+    return true;
+  }
+  return false;
 }
 
 export function getTunnelServerIdFromUrl(): string | null {
-  return new URLSearchParams(window.location.search).get("tunnel");
+  return parseBootstrapPayload()?.endpoint_id ?? null;
 }
 
 export type TunnelStatus =
@@ -118,17 +150,12 @@ export function isConnected(): boolean {
   return runtime !== null && serverEndpointId !== null;
 }
 
-/**
- * Perform an API request through the iroh tunnel.
- * Returns a Response-like object compatible with the fetch API subset
- * that api.ts uses.
- */
 export async function tunnelFetch(
   path: string,
   options: RequestInit = {},
 ): Promise<Response> {
   if (!runtime) {
-    throw new Error("Tunnel not initialized — call initTunnel() first");
+    throw new Error("Tunnel not initialized");
   }
 
   const method = (options.method ?? "GET").toUpperCase();
