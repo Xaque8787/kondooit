@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "kondooit-runtime/**"
+      - "web/**"
   workflow_dispatch:
 
 permissions:
@@ -36,13 +37,35 @@ jobs:
           cargo build --target wasm32-unknown-unknown --release
           wasm-bindgen \
             --target web \
-            --out-dir public/wasm \
+            --out-dir wasm-out \
             target/wasm32-unknown-unknown/release/kondooit_runtime.wasm
 
-      - name: Prepare pages artifact
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build React app
+        working-directory: web
+        run: |
+          npm ci
+          npx vite build --mode runtime
+
+      - name: Assemble site
         run: |
           mkdir -p _site/runtime
-          cp -r kondooit-runtime/public/* _site/runtime/
+
+          # React app is the base — its index.html, JS, CSS, and assets
+          cp -r web/dist/* _site/runtime/
+
+          # WASM files go into /runtime/wasm/ where tunnel.ts loads them
+          mkdir -p _site/runtime/wasm
+          cp kondooit-runtime/wasm-out/* _site/runtime/wasm/
+
+          # SPA fallback: all routes serve index.html (GitHub Pages 404 trick)
+          cp _site/runtime/index.html _site/runtime/404.html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

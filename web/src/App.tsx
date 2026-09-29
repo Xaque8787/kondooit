@@ -22,10 +22,16 @@ import { ProvidersPage } from "./pages/ProvidersPage";
 import { PlayerPage } from "./pages/PlayerPage";
 import { ProfileSettingsPage } from "./pages/ProfileSettingsPage";
 import { RemoteAccessPage } from "./pages/RemoteAccessPage";
+import { TunnelConnectPage } from "./pages/TunnelConnectPage";
+import { isTunnelMode, isConnected } from "./tunnel";
 
 function ProtectedRoute({ children }: { children: ReactNode }) {
   const { user, activeProfile, loading } = useAuth();
   const location = useLocation();
+
+  if (isTunnelMode() && !isConnected()) {
+    return <Navigate to="/tunnel" replace />;
+  }
 
   if (loading) {
     return (
@@ -67,6 +73,10 @@ function PublicRoute({ children }: { children: ReactNode }) {
 function ProfileRoute({ children }: { children: ReactNode }) {
   const { user, activeProfile, loading } = useAuth();
 
+  if (isTunnelMode() && !isConnected()) {
+    return <Navigate to="/tunnel" replace />;
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -86,23 +96,35 @@ function ProfileRoute({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+function TunnelGate({ children }: { children: ReactNode }) {
+  if (isTunnelMode() && !isConnected()) {
+    return <Navigate to="/tunnel" replace />;
+  }
+  return <>{children}</>;
+}
+
 function AppRoutes() {
   return (
     <Routes>
+      <Route path="/tunnel" element={<TunnelConnectPage />} />
       <Route
         path="/login"
         element={
-          <PublicRoute>
-            <LoginPage />
-          </PublicRoute>
+          <TunnelGate>
+            <PublicRoute>
+              <LoginPage />
+            </PublicRoute>
+          </TunnelGate>
         }
       />
       <Route
         path="/setup"
         element={
-          <PublicRoute>
-            <SetupPage />
-          </PublicRoute>
+          <TunnelGate>
+            <PublicRoute>
+              <SetupPage />
+            </PublicRoute>
+          </TunnelGate>
         }
       />
       <Route
@@ -132,15 +154,23 @@ function AppRoutes() {
         <Route path="/remote-access" element={<RemoteAccessPage />} />
         <Route path="/player" element={<PlayerPage />} />
       </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route
+        path="*"
+        element={
+          isTunnelMode() && !isConnected()
+            ? <Navigate to="/tunnel" replace />
+            : <Navigate to="/" replace />
+        }
+      />
     </Routes>
   );
 }
 
 export default function App() {
+  const basename = import.meta.env.BASE_URL?.replace(/\/$/, "") || "";
   return (
     <AuthProvider>
-      <BrowserRouter>
+      <BrowserRouter basename={basename}>
         <AppRoutes />
       </BrowserRouter>
     </AuthProvider>

@@ -25,6 +25,8 @@ import type {
   WatchProgressResponse,
 } from "./types";
 
+import { isConnected, tunnelFetch } from "./tunnel";
+
 const API_BASE = "/api";
 
 function getToken(): string | null {
@@ -57,7 +59,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (profileId) {
     headers["X-Profile-Id"] = profileId;
   }
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const fullPath = `${API_BASE}${path}`;
+  const res = isConnected()
+    ? await tunnelFetch(fullPath, { ...options, headers })
+    : await fetch(fullPath, { ...options, headers });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(detail.detail || `Request failed: ${res.status}`);
@@ -337,12 +342,18 @@ export const api = {
     if (token) headers["Authorization"] = `Bearer ${token}`;
     if (profileId) headers["X-Profile-Id"] = profileId;
     try {
-      fetch(`${API_BASE}/watch-progress/beacon`, {
+      const beaconPath = `${API_BASE}/watch-progress/beacon`;
+      const beaconOpts: RequestInit = {
         method: "POST",
         headers,
         body: JSON.stringify(data),
         keepalive: true,
-      });
+      };
+      if (isConnected()) {
+        tunnelFetch(beaconPath, beaconOpts);
+      } else {
+        fetch(beaconPath, beaconOpts);
+      }
     } catch { /* best-effort on teardown */ }
   },
 
