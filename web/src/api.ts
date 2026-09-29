@@ -61,7 +61,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
   const fullPath = `${API_BASE}${path}`;
   const res = isConnected()
-    ? await tunnelFetch(fullPath, { ...options, headers })
+    ? await tunnelFetch(path, { ...options, headers })
     : await fetch(fullPath, { ...options, headers });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({ detail: res.statusText }));
