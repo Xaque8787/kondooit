@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, apiFetch } from "../api";
 import { isConnected } from "../tunnel";
 import type { SourceResult } from "../types";
 
@@ -199,9 +199,27 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
   onPlay?: (streamId: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [directUrl, setDirectUrl] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!streamId) return;
+    let cancelled = false;
+    apiFetch(`/api/hls/${streamId}/info`)
+      .then((res) => res.ok ? res.json() : null)
+      .then((info) => {
+        if (!cancelled && info?.direct_url && !info.needs_processing) {
+          setDirectUrl(info.direct_url);
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [streamId]);
+
+  // In local mode, use the proxy URL. In tunnel mode, use the direct URL if available.
   const streamUrl = streamId
-    ? isConnected() ? undefined : `${window.location.origin}/api/streams/${streamId}`
+    ? isConnected()
+      ? directUrl
+      : `${window.location.origin}/api/streams/${streamId}`
     : undefined;
 
   const handleCopy = () => {

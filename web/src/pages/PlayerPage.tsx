@@ -21,6 +21,8 @@ interface StreamInfo {
   probe_failed?: boolean;
   error?: string;
   failed?: boolean;
+  direct_url?: string | null;
+  needs_processing?: boolean;
 }
 
 function formatTime(s: number): string {
@@ -96,6 +98,7 @@ export function PlayerPage() {
   const [isSeeking, setIsSeeking] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
   const [streamInfo, setStreamInfo] = useState<StreamInfo | null>(null);
+  const [directUrl, setDirectUrl] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPaused, setIsPaused] = useState(true);
   const [isMuted, setIsMuted] = useState(false);
@@ -255,6 +258,12 @@ export function PlayerPage() {
     const video = videoRef.current;
     if (!video || isSeeking) return;
 
+    // Direct playback: browser handles seeking natively
+    if (directUrl) {
+      video.currentTime = Math.min(video.duration, Math.max(0, targetTime));
+      return;
+    }
+
     const bufferedEnd = video.buffered.length > 0
       ? video.buffered.end(video.buffered.length - 1)
       : video.duration;
@@ -264,7 +273,7 @@ export function PlayerPage() {
     } else if (realDuration > 0) {
       serverSeek(Math.max(0, Math.min(targetTime, realDuration)));
     }
-  }, [isSeeking, realDuration, serverSeek]);
+  }, [isSeeking, realDuration, serverSeek, directUrl]);
 
   // Init: fetch info then start HLS
   useEffect(() => {
@@ -296,6 +305,33 @@ export function PlayerPage() {
           if (info.decision) {
             const isRemux = info.decision.startsWith("remux");
             setLoadingMessage(isRemux ? "Starting stream..." : "Transcoding stream...");
+          }
+
+          // If the server says the source can be played directly, use the upstream URL
+          if (info.direct_url && !info.needs_processing) {
+            if (cancelled) return;
+            const video = videoRef.current;
+            if (!video) return;
+            setDirectUrl(info.direct_url);
+            setLoadingMessage("Starting stream...");
+            video.src = info.direct_url;
+            video.addEventListener("loadedmetadata", () => {
+              setLoading(false);
+              video.play().catch(() => {});
+            }, { once: true });
+            video.addEventListener("error", () => {
+              // If direct playback fails, fall back to HLS
+              console.warn("Direct playback failed, falling back to HLS");
+              setDirectUrl(null);
+              const hlsUrl = `/api/hls/${streamId}/master.m3u8?${codecParams}`;
+              if (Hls.isSupported()) {
+                createHls(hlsUrl, video);
+              } else {
+                setError("Playback failed and HLS fallback is unavailable.");
+                setLoading(false);
+              }
+            }, { once: true });
+            return;
           }
         }
       } catch { /* continue */ }
@@ -330,7 +366,7 @@ export function PlayerPage() {
         hlsRef.current = null;
       }
     };
-  }, [streamId, codecParams, createHls]);
+  }, [streamId, codecParams, createHls, autoPlaySession, tryNextAutoPlaySource]);
 
   // Periodically refresh stream info (to update transcoded_seconds)
   useEffect(() => {
@@ -431,7 +467,7 @@ export function PlayerPage() {
 
   const handleBack = () => {
     reportProgress();
-    if (streamId) {
+    if (streamId && !directUrl) {
       apiFetch(`/api/hls/${streamId}/stop`).catch(() => {});
     }
     navigate(-1);
@@ -445,9 +481,11 @@ export function PlayerPage() {
   };
 
   const progressPct = effectiveDuration > 0 ? (currentTime / effectiveDuration) * 100 : 0;
-  const transcodedPct = (streamInfo?.transcoded_seconds && effectiveDuration > 0)
-    ? (streamInfo.transcoded_seconds / effectiveDuration) * 100
-    : 100;
+  const transcodedPct = directUrl
+    ? 100
+    : (streamInfo?.transcoded_seconds && effectiveDuration > 0)
+      ? (streamInfo.transcoded_seconds / effectiveDuration) * 100
+      : 100;
 
   if (error) {
     return (
@@ -462,7 +500,9 @@ export function PlayerPage() {
     );
   }
 
-  const methodInfo = streamInfo?.decision ? describeMethod(streamInfo.decision) : null;
+  const methodInfo = directUrl
+    ? { method: "Direct", reason: "Playing directly from the source CDN — no server processing needed." }
+    : streamInfo?.decision ? describeMethod(streamInfo.decision) : null;
 
   return (
     <div

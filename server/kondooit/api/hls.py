@@ -643,6 +643,18 @@ class HlsController(Controller):
 
         session = hls_manager.get(stream_id)
 
+        # Determine if the source can be played directly by the browser
+        # without server-side processing. If so, expose the upstream URL
+        # so remote clients can play from the debrid CDN directly.
+        direct_url: str | None = None
+        needs_processing = True
+        if probe and not probe_incomplete and not transcode_blocked:
+            _, _, pre_decision = decide_codecs(probe)
+            is_remux = pre_decision.startswith("remux")
+            if is_remux and handle.upstream_auth is None:
+                direct_url = handle.upstream_url
+                needs_processing = False
+
         info: dict = {
             "stream_id": stream_id,
             "duration_seconds": probe.duration_seconds if probe else 0,
@@ -651,6 +663,8 @@ class HlsController(Controller):
             "width": probe.width if probe else 0,
             "height": probe.height if probe else 0,
             "probe_failed": False,
+            "direct_url": direct_url,
+            "needs_processing": needs_processing,
         }
         if transcode_blocked:
             info["failed"] = True
