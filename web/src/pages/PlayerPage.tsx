@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import Hls from "hls.js";
-import { api } from "../api";
+import { api, apiFetch } from "../api";
 import { detectCodecs } from "../codecs";
+import { isConnected } from "../tunnel";
+import { TunnelHlsLoader } from "../TunnelHlsLoader";
 
 const detected = detectCodecs();
 const clientCodecs = { vc: detected.video.join(","), ac: detected.audio.join(",") };
@@ -144,7 +146,7 @@ export function PlayerPage() {
   }, [autoPlaySession, streamId]);
 
   const createHls = useCallback((hlsUrl: string, videoEl: HTMLVideoElement, onReady?: () => void) => {
-    const hls = new Hls({
+    const hlsConfig: Partial<ConstructorParameters<typeof Hls>[0]> = {
       maxBufferLength: 30,
       maxMaxBufferLength: 120,
       maxBufferHole: 0.5,
@@ -156,7 +158,11 @@ export function PlayerPage() {
       fragLoadingRetryDelay: 1000,
       fragLoadingMaxRetry: 6,
       debug: false,
-    });
+    };
+    if (isConnected()) {
+      hlsConfig.loader = TunnelHlsLoader as unknown as typeof Hls.DefaultConfig.loader;
+    }
+    const hls = new Hls(hlsConfig);
     hlsRef.current = hls;
     hls.loadSource(hlsUrl);
     hls.attachMedia(videoEl);
@@ -177,7 +183,7 @@ export function PlayerPage() {
           if (data.response.text) console.error("[HLS RESPONSE]", data.response.text);
         } catch {}
         try {
-          const res = await fetch(`/api/hls/${streamId}/info`);
+          const res = await apiFetch(`/api/hls/${streamId}/info`);
           const info = await res.json();
           if (info.error) console.error("[HLS SERVER ERROR]", info.error);
         } catch {}
@@ -226,7 +232,7 @@ export function PlayerPage() {
     setLoading(true);
 
     try {
-      const resp = await fetch(`/api/hls/${streamId}/seek?t=${targetTime}&${codecParams}`);
+      const resp = await apiFetch(`/api/hls/${streamId}/seek?t=${targetTime}&${codecParams}`);
       if (!resp.ok) throw new Error("Seek failed");
 
       if (hlsRef.current) {
@@ -274,7 +280,7 @@ export function PlayerPage() {
     async function init() {
       try {
         setLoadingMessage("Analyzing stream...");
-        const infoResp = await fetch(`/api/hls/${streamId}/info`);
+        const infoResp = await apiFetch(`/api/hls/${streamId}/info`);
         if (infoResp.ok) {
           const info: StreamInfo = await infoResp.json();
           setStreamInfo(info);
@@ -331,7 +337,7 @@ export function PlayerPage() {
     if (!streamId) return;
     const interval = setInterval(async () => {
       try {
-        const resp = await fetch(`/api/hls/${streamId}/info`);
+        const resp = await apiFetch(`/api/hls/${streamId}/info`);
         if (resp.ok) {
           const info: StreamInfo = await resp.json();
           setStreamInfo(info);
@@ -426,7 +432,7 @@ export function PlayerPage() {
   const handleBack = () => {
     reportProgress();
     if (streamId) {
-      fetch(`/api/hls/${streamId}/stop`).catch(() => {});
+      apiFetch(`/api/hls/${streamId}/stop`).catch(() => {});
     }
     navigate(-1);
   };

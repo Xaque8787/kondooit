@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { isConnected } from "../tunnel";
 import type { SourceResult } from "../types";
 
 function formatSize(bytes: number): string {
@@ -200,7 +201,7 @@ function SourceRow({ result: r, onAdd, adding, added, onResolve, resolving, stre
   const [copied, setCopied] = useState(false);
 
   const streamUrl = streamId
-    ? `${window.location.origin}/api/streams/${streamId}`
+    ? isConnected() ? undefined : `${window.location.origin}/api/streams/${streamId}`
     : undefined;
 
   const handleCopy = () => {

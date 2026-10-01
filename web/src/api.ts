@@ -29,6 +29,19 @@ import { isConnected, tunnelFetch } from "./tunnel";
 
 const API_BASE = "/api";
 
+/**
+ * Tunnel-aware fetch for paths starting with /api/.
+ * In tunnel mode, strips the /api prefix and routes through iroh.
+ * Exported so PlayerPage and other code can use it for raw fetch calls.
+ */
+export async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
+  if (isConnected()) {
+    const tunnelPath = path.startsWith("/api") ? path.slice(4) : path;
+    return tunnelFetch(tunnelPath, options);
+  }
+  return fetch(path, options);
+}
+
 function getToken(): string | null {
   return localStorage.getItem("kondooit_token");
 }
