@@ -620,6 +620,8 @@ class VODStream:
     provider_id: UUID        # IPTV provider instance
     stream_url: str
     provider_metadata: str   # JSON blob of raw EXTINF/XC attributes
+    quality_label: str | None   # detected quality (e.g. "4K", "1080p", "SD")
+    batch_id: str           # current refresh batch — used for stale cleanup
     last_seen: datetime
 ```
 
@@ -688,7 +690,7 @@ Two-mode: bulk (85/60) and single-channel (80/50). Single-channel is more aggres
 
 #### VOD ingestion service (`application/vod_ingestion_service.py`)
 
-Orchestrates: parse provider → classify entries → compute content hashes → dedup across providers → persist → cleanup stale.
+Orchestrates: parse provider → apply title filters → classify entries → compute content hashes → dedup across providers → detect quality → persist with batch_id → cleanup stale streams → cleanup orphaned entries.
 
 Classification cascade (from Vodstrm, proven):
 1. `duration == "-1"` and not `force_vod` → live (skip, not VOD)
@@ -696,6 +698,10 @@ Classification cascade (from Vodstrm, proven):
 3. Air-date pattern → tv_vod
 4. 4-digit year → movie
 5. Fallback → unsorted (retained as diagnostic dump only — NOT browseable, NOT included in source search results)
+
+Quality detection runs after classification. It scans the raw title for quality keywords (4K, 2160p, 1080p, 720p, 480p, HEVC, HDR, etc.) and stores the result as `quality_label` on VODStream. Provider-level `quality_terms` can refine this — see §5.11.
+
+Title filtering runs before classification. It applies the provider's configured filter rules and the global default filters to clean up poorly parsed titles — see §5.11.
 
 ### 5.5 Infrastructure Layer
 
@@ -790,7 +796,8 @@ Following the project's dual-migration requirement (CLAUDE.md §20):
 6. `epg_channels` — EPG channel entries (from XMLTV)
 7. `programs` — EPG programme/schedule entries
 8. `iptv_vod_entries` — IPTV VOD content identity (deduped across providers)
-9. `iptv_vod_streams` — per-provider stream URLs for VOD entries
+9. `iptv_vod_streams` — per-provider stream URLs for VOD entries (includes `quality_label`, `batch_id` for stale cleanup)
+10. `iptv_filters` — per-provider filter rules (exclude and title replacement rules)
 
 Each table needs the standard: creation migration (via `apply_migration`), update to initial schema migration (0001), and Alembic version.
 
@@ -823,7 +830,145 @@ New pages:
 
 Navigation: "Live TV" appears alongside "Movies" and "TV Shows" in the main navigation, per ADR-0001. There is NO dedicated IPTV VOD browse section — IPTV VOD content appears exclusively as source results on existing movie and episode detail pages through the unified source search pipeline.
 
-### 5.10 What Is NOT in Scope
+### 5.10 VOD Lifecycle Management
+
+This section details four features that govern how VOD content is kept clean and correctly prioritized in the database. These are inspired by Vodstrm's proven approaches but simplified for Kondooit's architecture. All four operate during the VOD ingestion refresh cycle (§5.4 VOD ingestion service).
+
+#### 5.10.1 Stale Content Cleanup (Batch-Based Reconciliation)
+
+**Problem:** When a provider drops content from their playlist, the stale entries must be removed from the database. Without this, the VOD library accumulates dead links that produce errors when a user tries to play them.
+
+**Approach (from Vodstrm):** Each provider refresh generates a unique `batch_id`. All streams ingested during that refresh are tagged with this batch_id. After the refresh completes, any streams from that provider with an older batch_id are deleted — they were not seen in this refresh, so the provider no longer offers them.
+
+**Kondooit's implementation:**
+
+1. At the start of a provider refresh, generate a new `batch_id` (UUID string)
+2. Parse all VOD content from the provider
+3. For each VODStream, upsert with the current `batch_id` and update `last_seen`
+4. After all content is persisted, delete all VODStreams from this provider where `batch_id != current_batch_id`
+5. After stale streams are deleted, check for orphaned VODEntries — any VODEntry that has zero remaining VODStreams is deleted (no provider offers this content anymore)
+6. `unsorted` entries follow the same cleanup logic — they are also batch-tagged and cleaned up
+
+**What about content temporarily unavailable?** A provider might have a transient outage that causes content to disappear for one refresh cycle, then reappear. This is an acceptable trade-off — the content will be re-ingested on the next refresh when it reappears. Adding grace periods would add complexity for marginal benefit. The refresh interval (typically 1-6 hours) means the window of data loss is short.
+
+**Provider deletion:** When a provider is entirely removed (DELETE /api/iptv/providers/{id}), all VODStreams for that provider are deleted, followed by orphaned VODEntry cleanup. Same for channel data.
+
+**Provider deactivation:** When a provider is deactivated (is_active = false), its VODStreams are NOT deleted — they remain in the database but are excluded from source search results. If the provider is reactivated, the next refresh will reconcile via batch_id. This allows temporary deactivation without data loss.
+
+#### 5.10.2 Provider Priority for Duplicate Entries
+
+**Problem:** Multiple IPTV providers may offer the same movie or episode. Kondooit needs to present these intelligently — the user should see the best provider's result first, but all options should be available.
+
+**Approach:** Unlike Vodstrm (which selects one "winner" per entry for .strm file generation), Kondooit keeps ALL streams from ALL providers in the database. This is because Kondooit's unified source search pipeline can present multiple source options to the user — there is no need to pick a single winner.
+
+**Kondooit's implementation:**
+
+1. Each IPTV provider has a `priority` field (integer, lower = higher priority). This follows ADR-0011 (Provider Priority and Fallback).
+2. When the source search pipeline queries the VOD library, it returns all matching VODStreams for the requested content, sorted by:
+   a. Provider priority (lower number first)
+   b. Quality label (4K > 1080p > 720p > SD)
+   c. Most recently seen (fresher is better)
+3. All streams are returned as separate SourceResult entries — the user sees all available IPTV sources and can choose any one
+4. The first result in the sorted list is effectively the "primary" — it appears at the top of the IPTV source group
+
+**No winner selection is needed.** Vodstrm needs winner selection because it writes one .strm file per entry. Kondooit stores all streams in the database and presents them all through the API. This is simpler and more flexible — the user can choose a non-primary source if they prefer a different provider or quality.
+
+**Default priority:** New providers are assigned priority 100 by default. The admin can adjust priorities in the IPTV provider settings page.
+
+#### 5.10.3 Quality Terms
+
+**Problem:** IPTV providers often include quality indicators in stream titles (e.g., "Movie Title 4K HDR", "Series Name S01E01 1080p HEVC"). These need to be detected and stored so the source search pipeline can rank and filter by quality.
+
+**Approach (from Vodstrm):** Vodstrm stores `quality_terms` as a JSON field on each provider. This allows per-provider quality keyword configuration.
+
+**Kondooit's implementation:**
+
+Quality detection is a two-level system:
+
+**Level 1 — Global defaults (auto-applied):**
+
+A built-in quality detection map that runs on all providers without configuration. These are reasonable defaults that cover the vast majority of IPTV stream titles:
+
+| Pattern (regex, case-insensitive) | Quality Label |
+|---|---|
+| `\b(4k|2160p|uhd)\b` | `4K` |
+| `\b(1080p|fhd|full hd)\b` | `1080p` |
+| `\b(720p|hd)\b` | `720p` |
+| `\b(480p|576p|sd)\b` | `SD` |
+| `\b(hevc|h265|x265)\b` | adds `HEVC` codec tag |
+| `\b(hdr|hdr10|dolby vision|dv)\b` | adds `HDR` tag |
+
+The highest matching quality wins (4K > 1080p > 720p > SD). Codec and HDR tags are appended. If no pattern matches, `quality_label` is `None` (unknown quality).
+
+**Level 2 — Provider-level quality terms (optional override):**
+
+Each IPTV provider can optionally specify `quality_terms` — a list of custom regex patterns and their corresponding labels. These are merged with the global defaults (provider terms take precedence on conflict). This handles providers that use non-standard quality naming.
+
+**Why keep it simple:** Vodstrm's quality_terms are primarily used to decide which stream to write to a .strm file. Since Kondooit keeps all streams and presents them ranked, quality terms are used for ranking, not for winner selection. The global defaults cover the common cases. Provider-level override is available for edge cases but is not required for normal operation.
+
+**UI:** The IPTV provider settings page shows the global defaults and allows the admin to add provider-specific quality patterns. This is an advanced setting — most users will never need to touch it.
+
+#### 5.10.4 Title Filter Mechanism
+
+**Problem:** IPTV providers often have messy titles with extra metadata, prefixes, suffixes, or junk that interferes with classification and matching. Examples: "[US] Movie Title 4K", "Movie Title (2022) - Premium", "VOD: Series Name S01E01 HD". Without filtering, the classification cascade misfires and the content_hash produces poor matches.
+
+**Approach (from Vodstrm):** Vodstrm has a filter engine with four operations: replace, remove, exclude, include_only. This is powerful but complex. Kondooit simplifies this while keeping the essential capabilities.
+
+**Kondooit's implementation:**
+
+Three filter types, applied in order during ingestion (before classification):
+
+**1. Title cleanup rules (replace/remove) — auto-applied defaults:**
+
+A built-in set of regex replacements that clean up common title junk. These run on every provider without configuration:
+
+| Rule | Pattern | Replacement | Purpose |
+|---|---|---|---|
+| Remove bracketed prefixes | `^\[.+?\]\s*` | `` | Removes `[US]`, `[VOD]`, `[Premium]` etc. |
+| Remove VOD: prefix | `^VOD:\s*` | `` | Common IPTV prefix |
+| Remove trailing quality | `\s+(4K|2160p|1080p|720p|480p|HEVC|HDR|UHD)(?:\s|$)+` | `` | Quality is detected separately |
+| Remove trailing codec tags | `\s+(H264|H265|X264|X265|x264|x265)(?:\s|$)+` | `` | Codec is detected separately |
+| Collapse multiple spaces | `\s{2,}` | ` ` | Clean formatting |
+| Strip trailing dashes | `\s*[-–—]\s*# Live TV Research — Dispatcharr & Vodstrm Analysis and Implementation Plan
+
+#### 5.10.5 Summary of VOD Lifecycle
+
+``Provider Refresh Triggered``
+         ↓
+``Generate batch_id``
+         ↓
+``Fetch content from provider (M3U or XC)``
+         ↓
+``Apply title cleanup defaults``
+         ↓
+``Apply provider-level title replacement rules``
+         ↓
+``Apply provider-level exclude filters``
+         ↓
+``Classify entries (live → series → tv_vod → movie → unsorted)``
+         ↓
+``Detect quality from raw title``
+         ↓
+``Compute content_hash for each entry``
+         ↓
+``Upsert VODEntry (by content_hash) and VODStream (by entry + provider, tagged with batch_id)``
+         ↓
+``Delete stale VODStreams (old batch_id for this provider)``
+         ↓
+``Delete orphaned VODEntries (zero remaining streams)``
+         ↓
+``Refresh complete``
+
+When source search queries the VOD library:
+``Query iptv_vod_entries by cleaned_title + year/season/episode``
+         ↓
+``Get all matching VODStreams (from all active providers)``
+         ↓
+``Sort by provider priority → quality → last_seen``
+         ↓
+``Return as SourceResult list (all streams, best first)``
+
+### 5.11 What Is NOT in Scope
 
 - Stream proxy / transcoding for live TV — direct delivery only (client fetches stream URL directly)
 - DVR / recording
@@ -866,11 +1011,14 @@ The implementation should be ordered to build each layer on the previous one:
 3. Web UI: Live TV page, channel grid, channel detail, channel management
 
 **Phase 4: VOD Ingestion**
-1. Domain entities (VODEntry, VODStream)
+1. Domain entities (VODEntry, VODStream with batch_id and quality_label, FilterRule)
 2. Infrastructure: extend M3U parser + Xtream client for VOD content
-3. Application: VOD ingestion service (classify, dedup, persist)
-4. Application: integrate VOD search into source discovery pipeline
-5. API: VOD browsing endpoints (optional — VOD appears as sources on existing detail pages)
+3. Application: title cleanup defaults + quality detection map
+4. Application: VOD ingestion service (filter → classify → detect quality → dedup → persist → stale cleanup → orphan cleanup)
+5. Application: integrate VOD search into source discovery pipeline (sort by priority → quality → freshness)
+6. API: filter configuration endpoints (per-provider exclude and replacement rules)
+7. API: quality terms configuration endpoints (per-provider, optional)
+8. UI: filter and quality settings in IPTV provider configuration page
 
 **Phase 5: User Agent Support**
 1. Domain: add `user_agent` fields to provider and channel/override models
@@ -946,4 +1094,6 @@ These ADRs would be created as Proposed, then moved to Accepted when the roadmap
 
 - **Architectural alignment:** All new domain entities are pure Python dataclasses. All parsing is infrastructure. All scheduling is infrastructure. The provider abstraction (IPTVProviderPort) follows the existing pattern (MetadataProvider, SourceProvider). VOD integration with source discovery is a thin adapter — the VOD library is queried and results are normalized to SourceResult.
 
-- **Scope discipline:** This plan implements only the six features the user specified plus VOD ingestion. No stream proxy, no DVR, no connection counting, no ML matching, no .strm files, no dedicated IPTV VOD browse section. The architecture has clean extension points for future capabilities without implementing them.
+- **VOD lifecycle management:** Stale content is cleaned up via batch-based reconciliation (content dropped by a provider is removed). Duplicate entries across providers are handled by provider priority (all streams kept, ranked by priority → quality → freshness). Quality terms detect quality from stream titles (global defaults auto-applied, per-provider overrides optional). Title filters clean up poorly parsed titles (global cleanup defaults auto-applied, per-provider exclude and replacement rules user-configured).
+
+- **Scope discipline:** This plan implements only the six features the user specified plus VOD ingestion with full lifecycle management. No stream proxy, no DVR, no connection counting, no ML matching, no .strm files, no dedicated IPTV VOD browse section. The architecture has clean extension points for future capabilities without implementing them.
