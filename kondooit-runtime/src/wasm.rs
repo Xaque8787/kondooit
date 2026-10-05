@@ -9,6 +9,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
 use crate::{KondooitConnection, ALPN, STREAM_TYPE_CONTROL, STREAM_TYPE_HTTP};
+use base64::Engine;
 
 // ---------------------------------------------------------------------------
 // Module init
@@ -148,9 +149,15 @@ impl KondooitRuntime {
         })
     }
 
-    /// Send an HTTP request through the iroh tunnel and return the raw response.
+    /// Send an HTTP request through the iroh tunnel and return the response.
     ///
-    /// Returns a JSON string: { "status": 200, "headers": {...}, "body": "..." }
+    /// Returns a JSON string:
+    ///   { "status": 200, "headers": {...}, "body_b64": "...", "is_binary": true }
+    ///   { "status": 200, "headers": {...}, "body": "...", "is_binary": false }
+    ///
+    /// Binary bodies (video segments, etc.) are base64-encoded to avoid corruption
+    /// from UTF-8 string conversion. Text bodies (JSON, HLS manifests) are returned as
+    /// plain strings for efficiency.
     pub fn http_fetch(
         &self,
         method: String,
@@ -233,8 +240,7 @@ impl KondooitRuntime {
                 }
             }
 
-            let raw = String::from_utf8_lossy(&response_buf).into_owned();
-            let result = parse_http_response(&raw);
+            let result = parse_http_response_bytes(&response_buf);
             Ok(JsValue::from_str(&result))
         })
     }
@@ -271,16 +277,21 @@ async fn get_or_reconnect(
 }
 
 // ---------------------------------------------------------------------------
-// HTTP response parsing
+// HTTP response parsing (binary-safe)
 // ---------------------------------------------------------------------------
 
-fn parse_http_response(raw: &str) -> String {
-    let (header_section, body) = match raw.find("\r\n\r\n") {
-        Some(pos) => (&raw[..pos], &raw[pos + 4..]),
-        None => (raw, ""),
+fn parse_http_response_bytes(raw: &[u8]) -> String {
+    let sep = b"\r\n\r\n";
+    let header_end = match find_subslice(raw, sep) {
+        Some(pos) => pos,
+        None => return serde_json::json!({ "status": 0, "headers": {}, "body": "", "is_binary": false }).to_string(),
     };
 
-    let mut lines = header_section.lines();
+    let header_bytes = &raw[..header_end];
+    let body_bytes = &raw[header_end + sep.len()..];
+
+    let header_str = String::from_utf8_lossy(header_bytes);
+    let mut lines = header_str.lines();
 
     let status: u16 = lines
         .next()
@@ -301,31 +312,49 @@ fn parse_http_response(raw: &str) -> String {
         }
     }
 
-    let decoded_body = if is_chunked {
-        decode_chunked(body)
+    let body_bytes = if is_chunked {
+        decode_chunked_bytes(body_bytes)
     } else {
-        body.to_string()
+        body_bytes.to_vec()
     };
 
-    let result = serde_json::json!({
-        "status": status,
-        "headers": headers,
-        "body": decoded_body,
-    });
+    let is_binary = !body_bytes.is_empty() && String::from_utf8(body_bytes.as_slice()).is_err();
+
+    let result = if is_binary {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
+        serde_json::json!({
+            "status": status,
+            "headers": headers,
+            "body_b64": b64,
+            "is_binary": true,
+        })
+    } else {
+        let body_str = String::from_utf8_lossy(&body_bytes).into_owned();
+        serde_json::json!({
+            "status": status,
+            "headers": headers,
+            "body": body_str,
+            "is_binary": false,
+        })
+    };
 
     result.to_string()
 }
 
-fn decode_chunked(raw: &str) -> String {
-    let mut result = String::new();
-    let mut remaining = raw;
+fn decode_chunked_bytes(raw: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut pos = 0;
 
-    loop {
-        let size_end = match remaining.find("\r\n") {
-            Some(pos) => pos,
+    while pos < raw.len() {
+        let line_end = match find_subslice(&raw[pos..], b"\r\n") {
+            Some(rel) => pos + rel,
             None => break,
         };
-        let size_str = remaining[..size_end].trim();
+
+        let size_str = match std::str::from_utf8(&raw[pos..line_end]) {
+            Ok(s) => s.trim(),
+            Err(_) => break,
+        };
         let chunk_size = match usize::from_str_radix(size_str, 16) {
             Ok(s) => s,
             Err(_) => break,
@@ -335,23 +364,29 @@ fn decode_chunked(raw: &str) -> String {
             break;
         }
 
-        let data_start = size_end + 2;
+        let data_start = line_end + 2;
         let data_end = data_start + chunk_size;
-        if data_end > remaining.len() {
-            result.push_str(&remaining[data_start..]);
+        if data_end > raw.len() {
+            result.extend_from_slice(&raw[data_start..]);
             break;
         }
 
-        result.push_str(&remaining[data_start..data_end]);
+        result.extend_from_slice(&raw[data_start..data_end]);
 
-        let next = data_end + 2;
-        if next >= remaining.len() {
+        pos = data_end + 2;
+        if pos >= raw.len() {
             break;
         }
-        remaining = &remaining[next..];
     }
 
     result
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
 }
 
 // ---------------------------------------------------------------------------

@@ -194,10 +194,24 @@ export async function tunnelFetch(
   const parsed = JSON.parse(resultJson) as {
     status: number;
     headers: Record<string, string>;
-    body: string;
+    body?: string;
+    body_b64?: string;
+    is_binary: boolean;
   };
 
-  return new Response(parsed.body, {
+  let responseBody: BodyInit;
+  if (parsed.is_binary && parsed.body_b64) {
+    const binStr = atob(parsed.body_b64);
+    const bytes = new Uint8Array(binStr.length);
+    for (let i = 0; i < binStr.length; i++) {
+      bytes[i] = binStr.charCodeAt(i);
+    }
+    responseBody = bytes;
+  } else {
+    responseBody = parsed.body ?? "";
+  }
+
+  return new Response(responseBody, {
     status: parsed.status,
     headers: parsed.headers,
   });

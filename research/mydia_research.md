@@ -166,16 +166,69 @@ Kondooit's WASM runtime already implements persistent connection reuse (`get_or_
 
 **Status:** No change needed.
 
-### 3.3. HTTP/1.1 Parsing Robustness (Medium Value)
+### 3.3. Binary Data Corruption in Tunnel Mode — Confirmed Bug and Fix
 
-Both the server sidecar (`tunnel.rs`) and the browser WASM (`wasm.rs`) implement manual HTTP/1.1 parsing. The server handles Content-Length and chunked encoding. The client handles the same plus response parsing.
+**Status: FIXED (2026-10-05)**
 
-**Known limitations in the current implementation:**
+#### When video segments go through the tunnel
+
+The question of when binary video data actually flows through the iroh tunnel is important — Kondooit's architecture (ADR-0014, ADR-0017) defaults to direct CDN delivery for Debrid sources, which bypasses the tunnel entirely.
+
+The delivery decision happens in `PlayerPage.tsx` during stream initialization:
+
+1. The player calls `GET /api/hls/{streamId}/info` to get stream metadata.
+2. If `info.direct_url` is present AND `info.needs_processing` is false, the player sets `video.src = info.direct_url`. The browser fetches video directly from the provider CDN — no tunnel involvement, no bug.
+3. If `info.needs_processing` is true (or `direct_url` is absent), the player falls through to the HLS path: it loads `/api/hls/{streamId}/master.m3u8` via hls.js, and when `isConnected()` is true, hls.js uses `TunnelHlsLoader` to fetch both the manifest and the video segments through the iroh tunnel.
+
+**The bug is encountered when:**
+- A remote client (connected over iroh) plays content that needs **remuxing** (e.g., MKV/HEVC content that needs to be repackaged as HLS/fMP4 for the browser) or **transcoding** (e.g., HEVC video or AC3 audio that the browser cannot play natively).
+- The server generates HLS segments (MPEG-TS `.ts` or fMP4 `.m4s` files) and serves them through the `/api/hls/{streamId}/` endpoints.
+- The `TunnelHlsLoader` fetches these binary segments through `http_fetch`, where they are corrupted by the UTF-8 string conversion.
+
+**The bug is NOT encountered when:**
+- Direct playback works: the source codec is browser-compatible, the server returns a `direct_url`, and the browser fetches from the CDN directly. The tunnel carries only the control traffic (API calls, metadata, stream info).
+- The client is on the local network (not in tunnel mode). Local clients use normal `fetch()` and are unaffected.
+
+**Typical scenario:** A remote user tries to watch an HEVC-encoded movie from a Debrid provider. The browser cannot play HEVC natively, so the server must transcode to H.264/HLS. The HLS manifest (`.m3u8`) loads fine through the tunnel (it's text), but when hls.js requests the video segments (`.ts` or `.m4s`), the binary segment bytes are corrupted by `String::from_utf8_lossy`, and playback fails or produces garbled video.
+
+#### Root cause
+
+In `kondooit-runtime/src/wasm.rs`, the `http_fetch` function:
+1. Read the raw HTTP response into `Vec<u8>` (correct)
+2. Converted to `String` via `String::from_utf8_lossy()` — **this replaces invalid UTF-8 byte sequences with U+FFFD (0xEF 0xBF 0xBD), irreversibly destroying binary data**
+3. Parsed headers and body as strings
+4. Returned a JSON string with `"body": "..."` 
+
+On the TypeScript side (`tunnel.ts`), `tunnelFetch` parsed the JSON and passed `parsed.body` (a string) to `new Response()`. For binary data, this produced corrupted bytes.
+
+#### Fix applied
+
+**WASM side (`kondooit-runtime/src/wasm.rs`):**
+- Replaced `parse_http_response(&str)` with `parse_http_response_bytes(&[u8])` that operates on raw bytes throughout.
+- The new function splits headers from body using byte-level search (`find_subslice`), parses headers as UTF-8 (headers are always text), and decodes chunked transfer encoding at the byte level (`decode_chunked_bytes`).
+- After extracting the body bytes, it checks whether the body is valid UTF-8:
+  - **Valid UTF-8 (text responses — JSON, HLS manifests):** returns `{"body": "...", "is_binary": false}` — no encoding overhead, same as before.
+  - **Invalid UTF-8 (binary responses — video segments):** returns `{"body_b64": "...", "is_binary": true}` — base64-encodes the body. This preserves binary data perfectly with ~33% size overhead, which is acceptable for the rare case of binary content through the tunnel.
+
+**TypeScript side (`web/src/tunnel.ts`):**
+- `tunnelFetch` now checks `is_binary` in the response:
+  - If `true`, decodes `body_b64` via `atob()` into a `Uint8Array` and passes it to `new Response()`.
+  - If `false`, uses `body` as a string (unchanged behavior).
+
+**Dependency:** Added `base64 = "0.22"` to `kondooit-runtime/Cargo.toml`.
+
+**What was NOT changed:**
+- The server sidecar (`kondooit-iroh/src/tunnel.rs`) was not modified. It already tunnels raw bytes bidirectionally between the iroh stream and the TCP connection to Litestar. The corruption was purely on the client-side WASM response parsing, not the server-side tunnel.
+- The `TunnelHlsLoader` was not modified. It already calls `res.arrayBuffer()` for binary responses and `res.text()` for text responses — the fix is transparent to it because `new Response(Uint8Array)` produces a valid Response that `arrayBuffer()` can read correctly.
+
+**Trade-offs of the base64 approach:**
+- Base64 encoding adds ~33% size overhead to binary responses. This is acceptable because binary content through the tunnel (remuxed/transcoded HLS segments) is not the common case — direct CDN delivery is the default.
+- An alternative approach would be to return the body as a `Uint8Array` directly from WASM via `wasm_bindgen` (avoiding base64 entirely). This would be more efficient but requires restructuring the return type to be a `JsValue` object rather than a JSON string. The base64 approach was chosen because it is a minimal, low-risk change that fits the existing JSON-string return contract.
+
+#### Previous known limitations (remaining)
+
 - The server's `proxy_to_tcp` reads the entire request body via `tokio::io::copy` before reading the response — this buffers the full request in memory. For large POST bodies (e.g., file uploads), this could be memory-intensive.
-- **CONFIRMED BUG: Binary data corruption in tunnel mode.** The client's `http_fetch` converts the raw HTTP response bytes to a string via `String::from_utf8_lossy()`, then `parse_http_response` extracts the body as a string, and `tunnelFetch` passes that string to `new Response(parsed.body)`. HLS video segments (MPEG-TS, fMP4) are binary and contain byte sequences that are not valid UTF-8. `from_utf8_lossy` replaces invalid sequences with U+FFFD (3 bytes: `0xEF 0xBF 0xBD`), irreversibly destroying the original bytes. The data path is: `TunnelHlsLoader` → `apiFetch` → `tunnelFetch` → `runtime.http_fetch` (WASM) → `String::from_utf8_lossy` → corruption. This means **all binary HLS segment fetches through the iroh tunnel produce broken video**. Text-based data (JSON API responses, HLS manifests) works fine because they are valid UTF-8. The fix requires returning binary data from the WASM layer without going through UTF-8 string conversion — e.g., returning the body as a base64-encoded string, or returning the raw bytes via a `Uint8Array`/`ArrayBuffer` from the WASM layer instead of a JSON string.
-- Chunked transfer decoding is duplicated in both the server and client.
-
-**Recommendation:** If a shared core crate is created (3.1), consolidate the HTTP parsing into one implementation. The binary corruption bug (see above) must be fixed regardless — it is not a future concern but a current defect affecting all remote playback of proxied streams.
+- Chunked transfer decoding is duplicated in both the server and client. If a shared core crate is created (3.1), consolidate the HTTP parsing into one implementation.
 
 ### 3.4. Connection Health and Reconnection (Medium Value)
 
