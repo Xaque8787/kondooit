@@ -49,6 +49,10 @@ Unresolved questions that must be answered before the corresponding parts of the
 - What does the Kondooit application protocol look like concretely? (ADR-0007 establishes transport-independence; the protocol shape remains open.)
 - How should multiple networking providers be represented behind one interface?
 
+## Native clients
+
+- How should native Android/Fire TV clients be built, and how do they share the iroh connection logic with the browser runtime? → Resolved (Proposed) by [ADR-0018](../decisions/ADR-0018-android-fire-tv-client-architecture.md). Kotlin UI with shared Rust core via uniFFI. Not yet authorized for implementation.
+
 ## Ecosystem analysis
 
 - Which existing projects contain reusable implementation code versus architectural workarounds?

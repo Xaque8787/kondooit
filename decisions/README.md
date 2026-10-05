@@ -58,3 +58,6 @@ Status transitions:
 - [ADR-0013: Transport-agnostic stream handles replace client-constructed URLs](ADR-0013-transport-agnostic-stream-handles.md) (Superseded by ADR-0015)
 - [ADR-0014: Direct delivery default with proxy/remux/transcode fallback](ADR-0014-direct-delivery-default-with-proxy-remux-transcode-fallback.md)
 - [ADR-0015: Stream handles with direct and proxy modes](ADR-0015-stream-handles-with-direct-and-proxy-modes.md)
+- [ADR-0016: HLS remux for web playback](ADR-0016-hls-remux-for-web-playback.md)
+- [ADR-0017: iroh remote access architecture — sidecar endpoint, browser runtime, and delivery modes](ADR-0017-iroh-remote-access-architecture.md)
+- [ADR-0018: Android / Fire TV client architecture — Kotlin UI with shared Rust core via uniFFI](ADR-0018-android-fire-tv-client-architecture.md) (Proposed)
