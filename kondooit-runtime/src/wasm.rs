@@ -318,7 +318,7 @@ fn parse_http_response_bytes(raw: &[u8]) -> String {
         body_bytes.to_vec()
     };
 
-    let is_binary = !body_bytes.is_empty() && String::from_utf8(body_bytes.as_slice()).is_err();
+    let is_binary = !body_bytes.is_empty() && std::str::from_utf8(&body_bytes).is_err();
 
     let result = if is_binary {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
