@@ -566,15 +566,28 @@ subscriptions using standard protocols.
 - **Content mapping** — IPTV content is organized by categories and
   channels, not by IMDB ID. Matching IPTV content to metadata-provider
   content (so sources appear on detail pages) requires title-based
-  fuzzy matching. Unmatched IPTV content should still be browsable
-  through an IPTV-specific view.
+  fuzzy matching. IPTV VOD content is exclusively a source provider —
+  it appears as source results on movie and episode detail pages through
+  the unified source search pipeline. There is no dedicated IPTV VOD
+  browse section. Unmatched VOD (content that cannot be parsed into
+  movie/series/tv_vod) is retained as a diagnostic dump only and is not
+  browseable or included in source search results.
+
+  **Note:** This decision supersedes the earlier roadmap statement that
+  "IPTV channels and unmatched VOD content are browsable through a
+  dedicated IPTV section." See
+  [livetv_research.md](../research/livetv_research.md) §7.4 for the
+  resolution and rationale.
 - **Capabilities: DIRECT_SEARCH, CHANNEL_LIST**
 - **Playlist refresh** — playlists are fetched and cached with
   configurable refresh intervals, not re-fetched on every request
 
-IPTV sources that match a movie or episode appear alongside debrid and
-Usenet sources on detail pages. IPTV channels and unmatched VOD content
-are browsable through a dedicated IPTV section in the navigation.
+IPTV VOD sources that match a movie or episode appear alongside debrid
+and Usenet sources on detail pages through the unified source search
+pipeline. There is no dedicated IPTV VOD browse section — all content
+discovery goes through a single search mechanism with results from all
+configured providers. Live TV channels (not VOD) are browseable through
+the Live TV page, which is part of the EPG/live TV milestone, not v0.0.2.
 
 **Note:** EPG (electronic program guide) and live TV scheduling are NOT
 in scope for v0.0.2. IPTV in this milestone means "access to streams" —
@@ -721,10 +734,9 @@ The content detail pages (movie, episode) gain a "Sources" section:
 - Provider settings page extended with source provider configuration
   and source resolver module management
 
-The IPTV section in navigation shows:
-- Channel categories (from playlist groups)
-- Channel list with names and logos
-- VOD categories and titles (if the IPTV service provides VOD)
+The IPTV integration appears in the source search results on content
+detail pages, not as a separate navigation section. Live TV channel
+browsing is part of the EPG/live TV milestone, not v0.0.2.
 
 ### NOT Included
 

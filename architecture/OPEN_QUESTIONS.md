@@ -32,7 +32,15 @@ Unresolved questions that must be answered before the corresponding parts of the
 ## Content model
 
 - How should seasons/episodes/collections map across providers that do not natively model them?
-- How are live channels, EPG programs, and schedules modeled concretely, and how do they relate to metadata identity?
+- How are live channels, EPG programs, and schedules modeled concretely, and how do they relate to metadata identity? → Resolved (Proposed) by [livetv_research.md](../research/livetv_research.md) §7.2. ADR to be created: "EPG and channel domain model" — Channel, ChannelGroup, ChannelOverride, EPGSource, EPGChannel, Program as domain entities. ChannelOverride pattern for user customization preservation. Provider-first channel numbering with next-available fallback.
+
+## IPTV / Live TV
+
+- Should IPTV providers be a new provider type or extend the existing SourceProvider abstraction? → Resolved (Proposed) by [livetv_research.md](../research/livetv_research.md) §7.1. IPTV is a separate capability with its own interface (IPTVProviderPort), not an extension of SourceProvider. ADR to be created: "IPTV provider architecture."
+- Should EPG matching use rapidfuzz or a simpler string similarity? → Resolved by [livetv_research.md](../research/livetv_research.md) §7.2. Use rapidfuzz.
+- How should the scheduler be initialized and managed? → Resolved by [livetv_research.md](../research/livetv_research.md) §7.3. APScheduler integrated into Litestar startup/shutdown lifecycle. Follow-up: investigate whether cron-style or timezone-aware scheduling is needed beyond simple hour intervals.
+- Should VOD content from IPTV providers appear in the main discovery catalog or only as source results? → Resolved by [livetv_research.md](../research/livetv_research.md) §7.4. IPTV VOD is source-only — no dedicated browse section. All content discovery goes through the single unified source search pipeline. The v0.0.2 roadmap statement about a dedicated IPTV section is superseded by this decision and should be updated. ADR to be created: "IPTV VOD as source candidates only."
+- Should channel numbers be auto-assigned or manually set on first import? → Resolved by [livetv_research.md](../research/livetv_research.md) §7.5. Provider-first numbering with next-available fallback, overridable via ChannelOverride.
 
 ## Acquisition
 
@@ -75,3 +83,11 @@ Questions resolved by ADRs to date:
 - Provider capability declaration → [ADR-0010](../decisions/ADR-0010-provider-capability-declaration.md)
 
 The remaining questions above are **open**. Do not begin implementation that depends on any of them until the relevant question is resolved and recorded as an ADR.
+
+Questions resolved by research (ADRs to be created as Proposed):
+
+- IPTV provider architecture (separate capability, not SourceProvider) → [livetv_research.md](../research/livetv_research.md) §7.1
+- EPG matching with rapidfuzz → [livetv_research.md](../research/livetv_research.md) §7.2
+- Scheduler integrated into Litestar lifecycle → [livetv_research.md](../research/livetv_research.md) §7.3
+- IPTV VOD as source-only, no dedicated browse section → [livetv_research.md](../research/livetv_research.md) §7.4
+- Channel numbering: provider-first, next-available fallback → [livetv_research.md](../research/livetv_research.md) §7.5

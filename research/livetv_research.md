@@ -3,7 +3,7 @@
 **Date:** 2026-10-05
 **Status:** Research (pre-implementation)
 **Sources analyzed:** [Dispatcharr](https://github.com/dispatcharr/dispatcharr.git), [Vodstrm](https://github.com/Xaque8787/vodstrm.git)
-**Source code:** Cloned to `source/dispatcharr-repo/` and `source/vodstrm-repo/` (git-ignored)
+**Source code:** Analyzed from cloned repositories (since removed). GitHub links: [Dispatcharr](https://github.com/dispatcharr/dispatcharr.git), [Vodstrm](https://github.com/Xaque8787/vodstrm.git)
 
 ---
 
@@ -440,7 +440,7 @@ Per the project's governing instructions (§5, §14 of CLAUDE.md), every capabil
 | `force_vod` flag | Implementation choice | Yes — practical necessity for some providers |
 | Xtream Codes API (same endpoints as Dispatcharr) | Intrinsic domain functionality | Yes |
 | Two-tier series handling (catalog + lazy episodes) | Implementation choice | Yes — catalog-first for quick browseability |
-| .strm file generation | Ecosystem workaround | No — Kondooit IS the media server |
+| .strm file generation | Ecosystem workaround | No — Kondooit stores stream URLs in the database directly; it does not need .strm files since it IS the media server |
 | Filter engine (replace/remove/exclude/include_only) | Implementation choice | Simplified — basic exclude filters only |
 | Follow rules (import_selected mode) | Implementation choice | No — generate_all only |
 | Download queue | Feature outside scope | No |
@@ -626,8 +626,10 @@ class VODStream:
 **Key decisions:**
 - VODEntry/VODStream separation mirrors Kondooit's content/source distinction (ADR-0002). VODEntry = what the content is. VODStream = where it comes from.
 - `content_hash` is the cross-provider dedup key, based on Vodstrm's proven approach.
-- VOD content from IPTV providers becomes source candidates in the unified catalog. When a user views a movie detail page and requests sources, the system queries both debrid/usenet sources AND the IPTV VOD library for matches.
+- VOD content from IPTV providers is exclusively source candidates — they are NOT browseable as standalone catalog entries. All content discovery in Kondooit goes through a single unified search pipeline. When a user views a movie or episode detail page and requests sources, the system queries all configured providers (debrid, Usenet, hash aggregators, AND the IPTV VOD library) and returns results through one unified source list.
+- `unsorted` entries (titles that cannot be parsed into movie/series/tv_vod) are a catch-all dump for unparseable content. They are NOT browseable and NOT included in source search results. They are retained in the database for diagnostic purposes only.
 - Matching IPTV VOD to metadata-provider content is title-based fuzzy matching (same approach as channel-to-EPG matching, simpler).
+- No .strm files are created. Kondooit stores stream URLs directly in the database (on VODStream) and serves them through its own API. The .strm file format is an ecosystem artifact for external media servers (Jellyfin/Plex/Stremio) — Kondooit IS the media server and has no need for this intermediary.
 
 ### 5.4 Application Layer
 
@@ -693,7 +695,7 @@ Classification cascade (from Vodstrm, proven):
 2. SxxExx pattern → series
 3. Air-date pattern → tv_vod
 4. 4-digit year → movie
-5. Fallback → unsorted
+5. Fallback → unsorted (retained as diagnostic dump only — NOT browseable, NOT included in source search results)
 
 ### 5.5 Infrastructure Layer
 
@@ -808,6 +810,8 @@ IPTV VOD sources are marked as "In Library" (instant availability, no debrid/cac
 
 The VOD library search uses the same title normalization as EPG matching (lowercase, remove extraneous words, etc.) for consistent fuzzy matching.
 
+**Single unified search pipeline:** All content discovery in Kondooit goes through one search mechanism. There is no dedicated IPTV browse section for VOD content. IPTV VOD is exclusively a source provider — its results appear alongside debrid, Usenet, and hash aggregator results when a user searches for sources on a movie or episode detail page. This is a deliberate design choice: one search pipeline, multiple provider types contributing results.
+
 ### 5.9 Web UI
 
 New pages:
@@ -817,7 +821,7 @@ New pages:
 - **IPTV provider settings** — add/edit M3U and XC providers, configure refresh intervals, set user agents, trigger manual refresh.
 - **EPG source settings** — add/edit XMLTV sources, configure refresh intervals, trigger EPG matching.
 
-Navigation: "Live TV" appears alongside "Movies" and "TV Shows" in the main navigation, per ADR-0001.
+Navigation: "Live TV" appears alongside "Movies" and "TV Shows" in the main navigation, per ADR-0001. There is NO dedicated IPTV VOD browse section — IPTV VOD content appears exclusively as source results on existing movie and episode detail pages through the unified source search pipeline.
 
 ### 5.10 What Is NOT in Scope
 
@@ -827,7 +831,8 @@ Navigation: "Live TV" appears alongside "Movies" and "TV Shows" in the main navi
 - Multi-stream failover per channel
 - Schedules Direct EPG
 - ML-based EPG matching
-- .strm file generation
+- .strm file generation — Kondooit stores stream URLs in the database directly; it does not need .strm files since it IS the media server
+- Dedicated IPTV VOD browse section — all content discovery goes through the single unified source search pipeline; IPTV VOD is exclusively a source provider, not a browseable catalog
 - import_selected mode (follow rules, manual import)
 - HDHR / XC output protocols
 - Custom stream profiles (ffmpeg/vlc commands)
@@ -875,29 +880,59 @@ The implementation should be ordered to build each layer on the previous one:
 
 ---
 
-## 7. Open Questions
+## 7. Resolved Questions
 
-1. **Should IPTV providers be a new provider type or extend the existing SourceProvider abstraction?** The v0.0.2 roadmap defines SourceProvider for debrid/usenet. IPTV is fundamentally different (channels + VOD vs. search-for-content). Recommendation: IPTV is a separate capability, not another SourceProvider. The VOD search integration is a thin adapter that queries the VOD library and returns SourceResult entities, but the IPTV provider itself is its own abstraction (IPTVProviderPort). This needs an ADR.
+All five open questions from the initial research have been resolved through review. The resolutions below are authoritative and will guide implementation.
 
-2. **Should EPG matching use rapidfuzz or a simpler string similarity?** Dispatcharr uses rapidfuzz. It's a lightweight Python package with no heavy dependencies. Recommendation: use rapidfuzz. This needs validation that it installs cleanly in the Docker image.
+### 7.1 IPTV providers are a separate capability (RESOLVED)
 
-3. **How should the scheduler be initialized and managed?** APScheduler runs as a BackgroundScheduler in the server process. It needs to start on server startup and shut down cleanly. This may need a small integration with the existing Litestar startup/shutdown lifecycle.
+**Decision:** IPTV is a separate capability with its own interface (`IPTVProviderPort`), not an extension of the existing `SourceProvider` abstraction.
 
-4. **Should VOD content from IPTV providers appear in the main discovery catalog or only as source results?** The roadmap says "IPTV channels and unmatched VOD content are browsable through a dedicated IPTV section." Matched VOD appears as sources on existing detail pages. Unmatched VOD needs its own browseable section. How does this interact with the provider-driven discovery model (ADR-0009)? This needs an ADR or clarification.
+**Rationale:** The v0.0.2 roadmap defines `SourceProvider` for debrid/usenet services that search for content by title/IMDB ID. IPTV is fundamentally different — it provides channels and VOD content organized by categories, not search-by-title results. The VOD search integration is a thin adapter that queries the IPTV VOD library and returns `SourceResult` entities when a user searches for sources, but the IPTV provider itself is its own abstraction with its own port.
 
-5. **Should channel numbers be auto-assigned or manually set on first import?** Recommendation: auto-assign using `next_available` numbering on first import, then let the user reorder via overrides. This matches Dispatcharr's approach.
+**Will be recorded as:** ADR (Proposed) — "IPTV provider architecture."
+
+### 7.2 EPG matching uses rapidfuzz (RESOLVED)
+
+**Decision:** Use rapidfuzz for fuzzy name matching between channels and EPG entries.
+
+**Rationale:** rapidfuzz is a lightweight Python package with no heavy dependencies (unlike Dispatcharr's ML tier which requires sentence-transformers and model downloads). It provides good quality string similarity scoring. Needs validation that it installs cleanly in the Docker image during implementation.
+
+### 7.3 Scheduler integrated into Litestar lifecycle (RESOLVED — with follow-up)
+
+**Decision:** The scheduler should be integrated into Litestar's startup/shutdown lifecycle — start on server startup, stop on shutdown.
+
+**Rationale:** APScheduler's `BackgroundScheduler` runs in-process. Litestar has lifecycle hooks for startup and shutdown that are the natural place to initialize and tear down the scheduler. This keeps everything in one process without requiring a separate worker.
+
+**Follow-up:** The user identified a need to explore whether Litestar's lifecycle alone is sufficient, or whether the scheduler should also support cron-style or timezone-aware scheduling (which APScheduler provides independently of Litestar). This should be investigated during implementation to determine if the interval-based approach (simple hour intervals) is sufficient or if cron-style scheduling is needed for more flexible refresh timing. This is an implementation detail, not an architectural question.
+
+### 7.4 IPTV VOD is source-only — no dedicated browse section (RESOLVED)
+
+**Decision:** All content discovery in Kondooit goes through a single unified search pipeline. IPTV VOD content appears exclusively as source results on existing movie and episode detail pages. There is NO dedicated IPTV VOD browse section. Unmatched VOD (content that cannot be parsed into movie/series/tv_vod) is retained as a diagnostic dump only — it is NOT browseable and NOT included in source search results.
+
+**Rationale:** Kondooit's design principle is a single search mechanism with multiple results/sources from any configured providers. Adding a dedicated IPTV browse section would fragment the content discovery experience. The roadmap statement "IPTV channels and unmatched VOD content are browsable through a dedicated IPTV section" is superseded by this decision — IPTV VOD is source-only. Live TV channels remain browseable through the Live TV page (that is the channel guide, not VOD).
+
+**Note:** This decision updates the v0.0.2 roadmap's IPTV description. The roadmap should be updated to reflect that IPTV VOD is source-only and does not have a dedicated browse section. This is a scope refinement, not an architectural change.
+
+**Will be recorded as:** ADR (Proposed) — "IPTV VOD as source candidates only."
+
+### 7.5 Channel numbers: provider-first, next-available fallback (RESOLVED)
+
+**Decision:** Auto-assign channel numbers on first import using the provider's channel number when available (`tvg-chno` from M3U or `num` from XC), falling back to next-available numbering for channels without a provider number. Users can then override channel numbers via ChannelOverride.
+
+**Rationale:** This combines the best of both approaches — provider-supplied numbers are usually meaningful (the provider's intended channel ordering), and next-available fills gaps cleanly. This matches Dispatcharr's `provider` numbering mode with `next_available` fallback.
 
 ---
 
 ## 8. ADRs Needed
 
-Before implementation begins, the following ADRs should be created:
+Before implementation begins, the following ADRs should be created as Proposed:
 
-1. **IPTV provider architecture** — IPTV as a distinct provider capability (not another SourceProvider). Defines the IPTVProviderPort interface, M3U/XC as implementations, and the relationship to the source discovery pipeline.
+1. **IPTV provider architecture** — IPTV as a distinct provider capability (not another SourceProvider). Defines the `IPTVProviderPort` interface, M3U/XC as implementations, and the relationship to the source discovery pipeline. (Resolves question 7.1.)
 
-2. **EPG and channel domain model** — Channel, ChannelGroup, ChannelOverride, EPGSource, EPGChannel, Program as domain entities. ChannelOverride pattern for user customization preservation.
+2. **EPG and channel domain model** — Channel, ChannelGroup, ChannelOverride, EPGSource, EPGChannel, Program as domain entities. ChannelOverride pattern for user customization preservation. Provider-first channel numbering with next-available fallback. (Resolves question 7.5.)
 
-3. **IPTV VOD as source candidates** — How VOD content from IPTV providers integrates with the source discovery pipeline. VODEntry/VODStream separation, content-hash dedup, and the adapter that makes VOD matches appear as SourceResult entities.
+3. **IPTV VOD as source candidates only** — VOD content from IPTV providers is exclusively a source provider in the unified search pipeline. No dedicated browse section. VODEntry/VODStream separation, content-hash dedup, unsorted as diagnostic dump. Kondooit stores stream URLs in the database — no .strm file generation. (Resolves question 7.4.)
 
 These ADRs would be created as Proposed, then moved to Accepted when the roadmap authorizes implementation.
 
@@ -907,8 +942,8 @@ These ADRs would be created as Proposed, then moved to Accepted when the roadmap
 
 - **From Dispatcharr:** ChannelOverride pattern, EPG 3-tier matching (simplified to 2-tier), stream hash-based identity, per-provider user agent, stale cleanup. Reject: Celery/Redis scheduler, stream proxy, DVR, ML matching, multi-stream failover.
 
-- **From Vodstrm:** Content classification cascade (live → series → tv_vod → movie → unsorted), content-addressable identity for VOD dedup, `force_vod` flag, APScheduler for refresh, generate_all mode. Reject: .strm files, import_selected mode, follow rules, download queue, TMDB enrichment (already exists in Kondooit).
+- **From Vodstrm:** Content classification cascade (live → series → tv_vod → movie → unsorted), content-addressable identity for VOD dedup, `force_vod` flag, APScheduler for refresh, generate_all mode. Reject: .strm files (Kondooit stores stream URLs in the database directly), import_selected mode, follow rules, download queue, TMDB enrichment (already exists in Kondooit).
 
 - **Architectural alignment:** All new domain entities are pure Python dataclasses. All parsing is infrastructure. All scheduling is infrastructure. The provider abstraction (IPTVProviderPort) follows the existing pattern (MetadataProvider, SourceProvider). VOD integration with source discovery is a thin adapter — the VOD library is queried and results are normalized to SourceResult.
 
-- **Scope discipline:** This plan implements only the six features the user specified plus VOD ingestion. No stream proxy, no DVR, no connection counting, no ML matching, no .strm files. The architecture has clean extension points for future capabilities without implementing them.
+- **Scope discipline:** This plan implements only the six features the user specified plus VOD ingestion. No stream proxy, no DVR, no connection counting, no ML matching, no .strm files, no dedicated IPTV VOD browse section. The architecture has clean extension points for future capabilities without implementing them.
