@@ -1,0 +1,184 @@
+import useSettingsStore from '../../../store/settings.jsx';
+import React, { useEffect, useState } from 'react';
+import {
+  getChangedGroupSettings,
+  parseGroupSettings,
+  saveGroupSettings,
+} from '../../../utils/pages/SettingsUtils.js';
+import useSettingsSaveGuard from '../../../hooks/useSettingsSaveGuard.jsx';
+import {
+  Alert,
+  Button,
+  Divider,
+  Flex,
+  NumberInput,
+  Select,
+  Stack,
+  Switch,
+} from '@mantine/core';
+import ConnectionSecurityPanel from './ConnectionSecurityPanel.jsx';
+import { useForm } from '@mantine/form';
+import { getSystemSettingsFormInitialValues } from '../../../utils/forms/settings/SystemSettingsFormUtils.js';
+import { REGION_CHOICES } from '../../../constants.js';
+
+const SYSTEM_GROUP = 'system_settings';
+
+const SystemSettingsForm = React.memo(({ active }) => {
+  const settings = useSettingsStore((s) => s.settings);
+  const isModular =
+    useSettingsStore((s) => s.environment.env_mode) === 'modular';
+  // Absent on an older backend: assume running rather than hide working controls.
+  const logCollectorRunning =
+    useSettingsStore((s) => s.environment.log_collector_running) !== false;
+  const ipLookupEnvDisabled = useSettingsStore(
+    (s) => s.environment.ip_lookup_env_disabled
+  );
+
+  const [saved, setSaved] = useState(false);
+  const { isSavingRef, runSave } = useSettingsSaveGuard();
+
+  const form = useForm({
+    mode: 'controlled',
+    initialValues: getSystemSettingsFormInitialValues(),
+  });
+
+  useEffect(() => {
+    if (!active) setSaved(false);
+  }, [active]);
+
+  useEffect(() => {
+    if (settings && !isSavingRef.current) {
+      form.setValues(parseGroupSettings(settings, SYSTEM_GROUP));
+    }
+  }, [settings]);
+
+  const onSubmit = async () => {
+    setSaved(false);
+
+    const changedSettings = getChangedGroupSettings(
+      form.getValues(),
+      settings,
+      SYSTEM_GROUP
+    );
+
+    try {
+      await runSave(async () => {
+        await saveGroupSettings(settings, SYSTEM_GROUP, changedSettings);
+        const latestSettings = useSettingsStore.getState().settings;
+        if (latestSettings) {
+          form.setValues(parseGroupSettings(latestSettings, SYSTEM_GROUP));
+        }
+        setSaved(true);
+      });
+    } catch (error) {
+      // Error notifications are already shown by API functions
+      // Just don't show the success message
+      console.error('Error saving settings:', error);
+    }
+  };
+
+  return (
+    <Stack gap="md">
+      {saved && (
+        <Alert variant="light" color="green" title="Saved Successfully" />
+      )}
+      <NumberInput
+        label="Maximum System Events"
+        description="Number of events to retain (minimum: 10, maximum: 1000). Events are displayed on the Stats page."
+        value={form.values['max_system_events'] || 100}
+        onChange={(value) => {
+          form.setFieldValue('max_system_events', value);
+        }}
+        min={10}
+        max={1000}
+        step={10}
+      />
+      {logCollectorRunning && (
+        <>
+          <Switch
+            label="Persist Logs to File"
+            description="Write logs to disk for the Logs page. Console output is unaffected."
+            {...form.getInputProps('log_persist', { type: 'checkbox' })}
+            id="log_persist"
+          />
+          <NumberInput
+            label="Maximum Log File Size (MB)"
+            description="Rotate the log once it grows past this size."
+            id="log_max_mb"
+            value={form.values['log_max_mb'] || 5}
+            onChange={(value) => {
+              form.setFieldValue('log_max_mb', value);
+            }}
+            min={1}
+            max={20}
+            step={1}
+          />
+          <NumberInput
+            label="Log Files Kept"
+            description="How many log files to keep before the oldest is deleted."
+            id="log_keep"
+            value={form.values['log_keep'] || 5}
+            onChange={(value) => {
+              form.setFieldValue('log_keep', value);
+            }}
+            min={2}
+            max={50}
+            step={1}
+          />
+        </>
+      )}
+      <Select
+        searchable
+        clearable
+        {...form.getInputProps('preferred_region')}
+        id="preferred_region"
+        name="preferred_region"
+        label="Preferred Region"
+        description="Used when matching EPG data to channels. Prioritizes guide entries from the selected region."
+        data={REGION_CHOICES.map((r) => ({
+          label: r.label,
+          value: `${r.value}`,
+        }))}
+      />
+      <Switch
+        label="Auto-Import Mapped Files"
+        description="Automatically import media files when they are mapped to a channel."
+        {...form.getInputProps('auto_import_mapped_files', {
+          type: 'checkbox',
+        })}
+        id="auto_import_mapped_files"
+      />
+      {!ipLookupEnvDisabled && (
+        <Switch
+          label="Enable IP Lookup"
+          description="Fetch and display the instance's public IP and country flag in the sidebar."
+          {...form.getInputProps('enable_ip_lookup', { type: 'checkbox' })}
+          id="enable_ip_lookup"
+        />
+      )}
+      <Switch
+        label="Enable Catchup"
+        description="When disabled, timeshift and catchup endpoints are blocked for all users, and channels are not advertised as supporting catchup to clients. Catchup capability is still shown in the web UI."
+        {...form.getInputProps('catchup_enabled', { type: 'checkbox' })}
+        id="catchup_enabled"
+      />
+      {isModular && (
+        <>
+          <Divider my="md" label="Connection Security" labelPosition="left" />
+          <ConnectionSecurityPanel />
+        </>
+      )}
+      <Flex mih={50} gap="xs" justify="flex-end" align="flex-end">
+        <Button
+          onClick={form.onSubmit(onSubmit)}
+          disabled={form.submitting}
+          variant="default"
+        >
+          Save
+        </Button>
+      </Flex>
+    </Stack>
+  );
+});
+
+export default SystemSettingsForm;

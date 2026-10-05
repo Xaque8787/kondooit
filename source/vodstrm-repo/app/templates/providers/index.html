@@ -1,0 +1,791 @@
+{% extends "base.html" %}
+
+{% block title %}Providers{% endblock %}
+{% block page_heading %}Providers{% endblock %}
+{% block page_description %}Manage M3U, Xtream Codes, and local-file sources.{% endblock %}
+{% block page_actions %}<button class="btn btn-primary" id="add-provider-btn">+ Add Provider</button>{% endblock %}
+
+{% block content %}
+{% if error %}
+<div class="alert alert-error" style="margin-bottom: 24px;">{{ error }}</div>
+{% endif %}
+
+<!-- ADD PROVIDER PANEL -->
+<div class="provider-panel" id="provider-panel" {% if not open_type %}style="display:none"{% endif %}>
+  <div class="provider-panel__header">
+    <span class="provider-panel__title">New Provider</span>
+    <button class="provider-panel__close" id="close-panel-btn" aria-label="Close">&times;</button>
+  </div>
+
+  <div class="radio-group">
+    <label class="radio-option {% if open_type == 'm3u' or not open_type %}radio-option--active{% endif %}" id="label-m3u">
+      <input type="radio" name="provider_type" value="m3u" id="type-m3u"
+        {% if open_type == 'm3u' or not open_type %}checked{% endif %} />
+      <span class="radio-option__icon">&#9654;</span>
+      <span>
+        <strong>M3U URL</strong>
+        <small>Provide a direct playlist URL</small>
+      </span>
+    </label>
+    <label class="radio-option {% if open_type == 'xtream' %}radio-option--active{% endif %}" id="label-xtream">
+      <input type="radio" name="provider_type" value="xtream" id="type-xtream"
+        {% if open_type == 'xtream' %}checked{% endif %} />
+      <span class="radio-option__icon">&#128737;</span>
+      <span>
+        <strong>Xtream Codes</strong>
+        <small>Connect via username &amp; password</small>
+      </span>
+    </label>
+    <label class="radio-option {% if open_type == 'local_file' %}radio-option--active{% endif %}" id="label-local">
+      <input type="radio" name="provider_type" value="local_file" id="type-local"
+        {% if open_type == 'local_file' %}checked{% endif %} />
+      <span class="radio-option__icon">&#128193;</span>
+      <span>
+        <strong>Local File</strong>
+        <small>Pick a file from /data/m3u</small>
+      </span>
+    </label>
+  </div>
+
+  <form method="post" action="/providers/add/m3u" id="form-m3u"
+    class="provider-form {% if open_type == 'xtream' %}provider-form--hidden{% endif %}">
+    <div class="form-group">
+      <label for="m3u-name">Name</label>
+      <input type="text" id="m3u-name" name="name" placeholder="My Provider"
+        value="{{ form_name or '' }}" required />
+    </div>
+    <div class="form-group">
+      <label for="m3u-url">Playlist URL</label>
+      <input type="url" id="m3u-url" name="url" placeholder="http://example.com/playlist.m3u"
+        value="{{ form_url or '' }}" required />
+    </div>
+    <div class="form-group form-group--sm">
+      <label for="m3u-priority" title="Lower number = higher priority when multiple providers share the same content">Priority</label>
+      <input type="number" id="m3u-priority" name="priority" value="10" min="1" max="999" style="width:88px" />
+    </div>
+    <div class="quality-section">
+      <span class="quality-section__label">Quality Priority <span class="label-optional">(optional)</span></span>
+      <p class="quality-section__hint">Terms matched against each stream's raw title. Higher-scoring streams win on conflict. Enter plain text — no regex needed.</p>
+      <div class="quality-tags" id="qtags-add-m3u"></div>
+      <div class="quality-add-row">
+        <input type="text" class="quality-add-input" placeholder="e.g. bluray" id="qadd-add-m3u" autocomplete="off" />
+        <button type="button" class="quality-add-btn" data-qadd="add-m3u">+ Add Term</button>
+      </div>
+      <input type="hidden" name="quality_terms" id="qhidden-add-m3u" value="[]" />
+    </div>
+    <div class="form-group form-group--checkbox">
+      <label class="checkbox-label">
+        <input type="checkbox" name="force_vod" value="on" />
+        <span>Force VOD content</span>
+      </label>
+      <p class="form-hint">Skip live-TV detection and classify all entries as VOD (series, TV, movies, or unsorted). Requires re-ingest to take effect.</p>
+    </div>
+    <div class="provider-form__footer">
+      <button type="submit" class="btn btn-primary">Add Provider</button>
+    </div>
+  </form>
+
+  <form method="post" action="/providers/add/xtream" id="form-xtream"
+    class="provider-form {% if open_type != 'xtream' %}provider-form--hidden{% endif %}">
+    <div class="form-group">
+      <label for="xt-name">Name</label>
+      <input type="text" id="xt-name" name="name" placeholder="My Xtream Provider"
+        value="{{ form_name or '' }}" required />
+    </div>
+    <div class="form-group">
+      <label for="xt-server-url">Server URL</label>
+      <div class="input-with-prefix">
+        <select name="server_scheme" class="input-prefix-select">
+          <option value="https://" {% if (form_server_scheme or 'https://') == 'https://' %}selected{% endif %}>https://</option>
+          <option value="http://" {% if form_server_scheme == 'http://' %}selected{% endif %}>http://</option>
+        </select>
+        <input type="text" id="xt-server-url" name="server_url"
+          placeholder="myxtream.tv" value="{{ form_server_url or '' }}" required />
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="xt-username">Username</label>
+        <input type="text" id="xt-username" name="username"
+          value="{{ form_username or '' }}" required />
+      </div>
+      <div class="form-group">
+        <label for="xt-password">Password</label>
+        <div class="password-field">
+          <input type="password" id="xt-password" name="password" required />
+          <button type="button" class="password-toggle" data-password-toggle
+            aria-label="Show password" aria-pressed="false" title="Show password">
+            <span class="password-toggle__icon" aria-hidden="true">&#128065;</span>
+          </button>
+        </div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group form-group--half">
+        <label for="xt-port">Port <span class="label-optional">(optional)</span></label>
+        <input type="text" id="xt-port" name="port" placeholder="8080"
+          value="{{ form_port or '' }}" />
+      </div>
+      <div class="form-group">
+        <label>Stream Format</label>
+        <div class="seg-control">
+          <label class="seg-control__opt">
+            <input type="radio" name="stream_format" value="ts"
+              {% if (form_stream_format or 'ts') == 'ts' %}checked{% endif %} />
+            <span>.ts</span>
+          </label>
+          <label class="seg-control__opt">
+            <input type="radio" name="stream_format" value="hls"
+              {% if form_stream_format == 'hls' %}checked{% endif %} />
+            <span>HLS</span>
+          </label>
+        </div>
+      </div>
+      <div class="form-group form-group--sm">
+        <label for="xt-priority" title="Lower number = higher priority when multiple providers share the same content">Priority</label>
+        <input type="number" id="xt-priority" name="priority" value="10" min="1" max="999" style="width:88px" />
+      </div>
+    </div>
+    <div class="quality-section">
+      <span class="quality-section__label">Quality Priority <span class="label-optional">(optional)</span></span>
+      <p class="quality-section__hint">Terms matched against each stream's raw title. Higher-scoring streams win on conflict. Enter plain text — no regex needed.</p>
+      <div class="quality-tags" id="qtags-add-xtream"></div>
+      <div class="quality-add-row">
+        <input type="text" class="quality-add-input" placeholder="e.g. bluray" id="qadd-add-xtream" autocomplete="off" />
+        <button type="button" class="quality-add-btn" data-qadd="add-xtream">+ Add Term</button>
+      </div>
+      <input type="hidden" name="quality_terms" id="qhidden-add-xtream" value="[]" />
+    </div>
+    <div class="form-group form-group--checkbox">
+      <label class="checkbox-label">
+        <input type="checkbox" name="force_vod" value="on" />
+        <span>Force VOD content</span>
+      </label>
+      <p class="form-hint">Skip live-TV detection and classify all entries as VOD (series, TV, movies, or unsorted). Requires re-ingest to take effect.</p>
+    </div>
+    <div class="provider-form__footer">
+      <button type="submit" class="btn btn-primary">Add Provider</button>
+    </div>
+  </form>
+
+  <form method="post" action="/providers/add/local_file" id="form-local"
+    class="provider-form {% if open_type != 'local_file' %}provider-form--hidden{% endif %}">
+    <div class="form-group">
+      <label for="local-name">Name</label>
+      <input type="text" id="local-name" name="name" placeholder="My Local Playlist"
+        value="{{ form_name or '' }}" required />
+    </div>
+    <div class="form-group">
+      <label>M3U File</label>
+      <div class="file-browser" id="file-browser-add" data-input="local-file-path-add"></div>
+      <input type="hidden" id="local-file-path-add" name="local_file_path"
+        value="{{ form_local_file_path or '' }}" required />
+      <div class="file-browser-selected" id="selected-add">
+        {% if form_local_file_path %}
+        <span class="file-browser-selected__icon">&#128196;</span>
+        <span class="file-browser-selected__path">{{ form_local_file_path }}</span>
+        {% else %}
+        <span class="file-browser-selected__placeholder">No file selected — browse below</span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="form-group form-group--sm">
+      <label for="local-priority" title="Lower number = higher priority when multiple providers share the same content">Priority</label>
+      <input type="number" id="local-priority" name="priority" value="10" min="1" max="999" style="width:88px" />
+    </div>
+    <div class="quality-section">
+      <span class="quality-section__label">Quality Priority <span class="label-optional">(optional)</span></span>
+      <p class="quality-section__hint">Terms matched against each stream's raw title. Higher-scoring streams win on conflict. Enter plain text — no regex needed.</p>
+      <div class="quality-tags" id="qtags-add-local"></div>
+      <div class="quality-add-row">
+        <input type="text" class="quality-add-input" placeholder="e.g. bluray" id="qadd-add-local" autocomplete="off" />
+        <button type="button" class="quality-add-btn" data-qadd="add-local">+ Add Term</button>
+      </div>
+      <input type="hidden" name="quality_terms" id="qhidden-add-local" value="[]" />
+    </div>
+    <div class="form-group form-group--checkbox">
+      <label class="checkbox-label">
+        <input type="checkbox" name="force_vod" value="on" />
+        <span>Force VOD content</span>
+      </label>
+      <p class="form-hint">Skip live-TV detection and classify all entries as VOD (series, TV, movies, or unsorted). Requires re-ingest to take effect.</p>
+    </div>
+    <div class="provider-form__footer">
+      <button type="submit" class="btn btn-primary" id="add-local-submit"
+        {% if not form_local_file_path %}disabled{% endif %}>Add Provider</button>
+    </div>
+  </form>
+</div>
+
+<!-- PROVIDERS TABLE -->
+{% if providers %}
+<div class="card provider-table-card">
+  <div class="provider-table-wrap">
+  <table class="table provider-table">
+    <thead>
+      <tr>
+        <th>Status</th>
+        <th>Name</th>
+        <th>Type</th>
+        <th>Details</th>
+        <th title="Lower number = higher priority">Priority</th>
+        <th>Added</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in providers %}
+      <tr class="provider-row {% if not p.is_active %}row--inactive{% endif %}">
+        <td data-label="Status">
+          {% if p.is_active %}
+          <button type="button"
+            class="toggle-btn toggle-btn--active"
+            data-disable-slug="{{ p.slug }}"
+            data-disable-name="{{ p.name }}"
+            title="Click to disable and remove data">
+            <span class="toggle-btn__dot"></span>
+            <span class="toggle-btn__label">Active</span>
+          </button>
+          {% else %}
+          <form method="post" action="/providers/{{ p.slug }}/toggle" style="display:inline">
+            <button type="submit"
+              class="toggle-btn toggle-btn--inactive"
+              title="Click to re-enable">
+              <span class="toggle-btn__dot"></span>
+              <span class="toggle-btn__label">Inactive</span>
+            </button>
+          </form>
+          {% endif %}
+        </td>
+        <td data-label="Name"><strong>{{ p.name }}</strong></td>
+        <td data-label="Type">
+          {% if p.type == 'm3u' %}
+          <span class="badge badge--blue">M3U</span>
+          {% elif p.type == 'xtream' %}
+          <span class="badge badge--green">Xtream</span>
+          {% else %}
+          <span class="badge badge--gray">Local</span>
+          {% endif %}
+        </td>
+        <td class="text-muted" data-label="Details">
+          <div class="provider-row-details">
+          {% if p.type == "m3u" %}
+            <button type="button" class="details-toggle" data-details="{{ p.slug }}">Show URL</button>
+            <div class="details-expanded" id="details-{{ p.slug }}" style="display:none">
+              <code class="details-value">{{ p.url }}</code>
+            </div>
+          {% elif p.type == "xtream" %}
+            {{ p.username }}{% if p.port %}:{{ p.port }}{% endif %}
+            <span class="badge badge--gray" style="margin-left:6px;">{{ ".ts" if (p.stream_format or "ts") == "ts" else "HLS" }}</span>
+          {% else %}
+            <button type="button" class="details-toggle" data-details="{{ p.slug }}">Show Path</button>
+            <div class="details-expanded" id="details-{{ p.slug }}" style="display:none">
+              <code class="details-value">{{ p.local_file_path or "—" }}</code>
+            </div>
+          {% endif %}
+          </div>
+        </td>
+        <td class="text-muted" data-label="Priority">{{ p.priority }}</td>
+        <td class="text-muted" data-label="Added">{{ p.created_at[:10] }}</td>
+        <td class="table-actions" data-label="Actions">
+          <div class="provider-row-actions">
+            <button type="button" class="btn btn-secondary btn-sm edit-open-btn"
+              data-edit-id="{{ p.slug }}">Edit</button>
+            <form method="post" action="/providers/{{ p.slug }}/delete"
+              data-confirm="Remove provider &quot;{{ p.name }}&quot;?" style="display:inline">
+              <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+
+      <!-- INLINE EDIT ROW -->
+      <tr class="edit-row" id="edit-row-{{ p.slug }}"
+        {% if edit_provider_slug != p.slug %}style="display:none"{% endif %}>
+        <td colspan="7" class="edit-row__cell">
+          {% if p.type == "m3u" %}
+          <form method="post" action="/providers/{{ p.slug }}/edit/m3u" class="inline-edit-form">
+            <div class="inline-edit-fields">
+              <div class="form-group">
+                <label>Name</label>
+                <input type="text" name="name" value="{{ p.name }}" required />
+              </div>
+              <div class="form-group" style="flex:2">
+                <label>Playlist URL</label>
+                <input type="url" name="url" value="{{ p.url or '' }}" required />
+              </div>
+              <div class="form-group form-group--sm">
+                <label title="Lower = higher priority">Priority</label>
+                <input type="number" name="priority" value="{{ p.priority }}" min="1" max="999" style="width:72px" />
+              </div>
+            </div>
+            <div class="quality-section">
+              <span class="quality-section__label">Quality Priority</span>
+              <p class="quality-section__hint">Terms matched against each stream's raw title. Higher-scoring streams win on conflict. Order determines tiebreaker weight. Enter plain text — no regex needed.</p>
+              <div class="quality-tags" id="qtags-{{ p.slug }}"></div>
+              <div class="quality-add-row">
+                <input type="text" class="quality-add-input" placeholder="e.g. bluray" id="qadd-{{ p.slug }}" autocomplete="off" />
+                <button type="button" class="quality-add-btn" data-qadd="{{ p.slug }}">+ Add Term</button>
+              </div>
+              <input type="hidden" name="quality_terms" id="qhidden-{{ p.slug }}" value="{{ p.quality_terms or '[]' }}" />
+            </div>
+            <div class="form-group form-group--checkbox">
+              <label class="checkbox-label">
+                <input type="checkbox" name="force_vod" value="on" {% if p.force_vod %}checked{% endif %} />
+                <span>Force VOD content</span>
+              </label>
+              <p class="form-hint">Skip live-TV detection and classify all entries as VOD. Requires re-ingest to take effect.</p>
+            </div>
+            <div class="inline-edit-actions">
+              <button type="submit" class="btn btn-primary btn-sm">Save</button>
+              <button type="button" class="btn btn-secondary btn-sm cancel-edit-btn"
+                data-edit-id="{{ p.slug }}">Cancel</button>
+            </div>
+          </form>
+          {% elif p.type == "xtream" %}
+          {% set _url = p.url or '' %}
+          {% if _url.startswith('https://') %}
+            {% set _scheme = 'https://' %}
+            {% set _host = _url[8:] %}
+          {% elif _url.startswith('http://') %}
+            {% set _scheme = 'http://' %}
+            {% set _host = _url[7:] %}
+          {% else %}
+            {% set _scheme = 'https://' %}
+            {% set _host = _url %}
+          {% endif %}
+          <form method="post" action="/providers/{{ p.slug }}/edit/xtream" class="inline-edit-form">
+            <div class="inline-edit-fields">
+              <div class="form-group">
+                <label>Name</label>
+                <input type="text" name="name" value="{{ p.name }}" required />
+              </div>
+              <div class="form-group" style="flex:2">
+                <label>Server URL</label>
+                <div class="input-with-prefix">
+                  <select name="server_scheme" class="input-prefix-select">
+                    <option value="https://" {% if _scheme == 'https://' %}selected{% endif %}>https://</option>
+                    <option value="http://" {% if _scheme == 'http://' %}selected{% endif %}>http://</option>
+                  </select>
+                  <input type="text" name="server_url" value="{{ _host }}" placeholder="myxtream.tv" required />
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Username</label>
+                <input type="text" name="username" value="{{ p.username or '' }}" required />
+              </div>
+              <div class="form-group">
+                <label>Password</label>
+                <div class="password-field">
+                  <input type="password" name="password" placeholder="New password" required />
+                  <button type="button" class="password-toggle" data-password-toggle
+                    aria-label="Show password" aria-pressed="false" title="Show password">
+                    <span class="password-toggle__icon" aria-hidden="true">&#128065;</span>
+                  </button>
+                </div>
+              </div>
+              <div class="form-group form-group--sm">
+                <label>Port <span class="label-optional">(opt)</span></label>
+                <input type="text" name="port" value="{{ p.port or '' }}" placeholder="8080" />
+              </div>
+              <div class="form-group form-group--sm">
+                <label>Stream Format</label>
+                <div class="seg-control">
+                  <label class="seg-control__opt">
+                    <input type="radio" name="stream_format" value="ts"
+                      {% if (p.stream_format or 'ts') == 'ts' %}checked{% endif %} />
+                    <span>.ts</span>
+                  </label>
+                  <label class="seg-control__opt">
+                    <input type="radio" name="stream_format" value="hls"
+                      {% if p.stream_format == 'hls' %}checked{% endif %} />
+                    <span>HLS</span>
+                  </label>
+                </div>
+              </div>
+              <div class="form-group form-group--sm">
+                <label title="Lower = higher priority">Priority</label>
+                <input type="number" name="priority" value="{{ p.priority }}" min="1" max="999" style="width:72px" />
+              </div>
+            </div>
+            <div class="quality-section">
+              <span class="quality-section__label">Quality Priority</span>
+              <p class="quality-section__hint">Terms matched against each stream's raw title. Higher-scoring streams win on conflict. Order determines tiebreaker weight. Enter plain text — no regex needed.</p>
+              <div class="quality-tags" id="qtags-{{ p.slug }}"></div>
+              <div class="quality-add-row">
+                <input type="text" class="quality-add-input" placeholder="e.g. bluray" id="qadd-{{ p.slug }}" autocomplete="off" />
+                <button type="button" class="quality-add-btn" data-qadd="{{ p.slug }}">+ Add Term</button>
+              </div>
+              <input type="hidden" name="quality_terms" id="qhidden-{{ p.slug }}" value="{{ p.quality_terms or '[]' }}" />
+            </div>
+            <div class="form-group form-group--checkbox">
+              <label class="checkbox-label">
+                <input type="checkbox" name="force_vod" value="on" {% if p.force_vod %}checked{% endif %} />
+                <span>Force VOD content</span>
+              </label>
+              <p class="form-hint">Skip live-TV detection and classify all entries as VOD. Requires re-ingest to take effect.</p>
+            </div>
+            <div class="inline-edit-actions">
+              <button type="submit" class="btn btn-primary btn-sm">Save</button>
+              <button type="button" class="btn btn-secondary btn-sm cancel-edit-btn"
+                data-edit-id="{{ p.slug }}">Cancel</button>
+            </div>
+          </form>
+          {% else %}
+          <form method="post" action="/providers/{{ p.slug }}/edit/local_file" class="inline-edit-form">
+            <div class="inline-edit-fields">
+              <div class="form-group">
+                <label>Name</label>
+                <input type="text" name="name" value="{{ p.name }}" required />
+              </div>
+              <div class="form-group" style="flex:2">
+                <label>M3U File</label>
+                <div class="file-browser" id="file-browser-edit-{{ p.slug }}"
+                  data-input="edit-file-path-{{ p.slug }}"></div>
+                <input type="hidden" id="edit-file-path-{{ p.slug }}" name="local_file_path"
+                  value="{{ p.local_file_path or '' }}" required />
+                <div class="file-browser-selected" id="selected-edit-{{ p.slug }}">
+                  {% if p.local_file_path %}
+                  <span class="file-browser-selected__icon">&#128196;</span>
+                  <span class="file-browser-selected__path">{{ p.local_file_path }}</span>
+                  {% else %}
+                  <span class="file-browser-selected__placeholder">No file selected</span>
+                  {% endif %}
+                </div>
+              </div>
+              <div class="form-group form-group--sm">
+                <label title="Lower = higher priority">Priority</label>
+                <input type="number" name="priority" value="{{ p.priority }}" min="1" max="999" style="width:72px" />
+              </div>
+            </div>
+            <div class="quality-section">
+              <span class="quality-section__label">Quality Priority</span>
+              <p class="quality-section__hint">Terms matched against each stream's raw title. Higher-scoring streams win on conflict. Order determines tiebreaker weight. Enter plain text — no regex needed.</p>
+              <div class="quality-tags" id="qtags-{{ p.slug }}"></div>
+              <div class="quality-add-row">
+                <input type="text" class="quality-add-input" placeholder="e.g. bluray" id="qadd-{{ p.slug }}" autocomplete="off" />
+                <button type="button" class="quality-add-btn" data-qadd="{{ p.slug }}">+ Add Term</button>
+              </div>
+              <input type="hidden" name="quality_terms" id="qhidden-{{ p.slug }}" value="{{ p.quality_terms or '[]' }}" />
+            </div>
+            <div class="form-group form-group--checkbox">
+              <label class="checkbox-label">
+                <input type="checkbox" name="force_vod" value="on" {% if p.force_vod %}checked{% endif %} />
+                <span>Force VOD content</span>
+              </label>
+              <p class="form-hint">Skip live-TV detection and classify all entries as VOD. Requires re-ingest to take effect.</p>
+            </div>
+            <div class="inline-edit-actions">
+              <button type="submit" class="btn btn-primary btn-sm">Save</button>
+              <button type="button" class="btn btn-secondary btn-sm cancel-edit-btn"
+                data-edit-id="{{ p.slug }}">Cancel</button>
+            </div>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% else %}
+<div class="empty-state">
+  <p>No providers added yet. Click <strong>+ Add Provider</strong> to get started.</p>
+</div>
+{% endif %}
+
+<!-- DISABLE CONFIRMATION MODAL -->
+<div class="modal-overlay" id="disable-modal" style="display:none" aria-modal="true" role="dialog">
+  <div class="modal">
+    <div class="modal__header">
+      <h3 class="modal__title">Disable Provider</h3>
+    </div>
+    <div class="modal__body">
+      <p>Disabling <strong id="disable-modal-name"></strong> will immediately:</p>
+      <ul class="modal__list">
+        <li>Remove all streams from this provider from the database</li>
+        <li>Delete any entries that have no other provider</li>
+        <li>Remove or hand over any .strm files this provider owned</li>
+      </ul>
+      <p class="modal__warning">This cannot be undone. To restore data, re-enable and re-ingest the provider.</p>
+    </div>
+    <div class="modal__footer">
+      <button type="button" class="btn btn-secondary" id="disable-modal-cancel">Cancel</button>
+      <form method="post" id="disable-modal-form" style="display:inline">
+        <button type="submit" class="btn btn-danger">Disable &amp; Remove Data</button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const panel      = document.getElementById("provider-panel");
+  const openBtn    = document.getElementById("add-provider-btn");
+  const closeBtn   = document.getElementById("close-panel-btn");
+  const radioM3u   = document.getElementById("type-m3u");
+  const radioXt    = document.getElementById("type-xtream");
+  const radioLocal = document.getElementById("type-local");
+  const formM3u    = document.getElementById("form-m3u");
+  const formXt     = document.getElementById("form-xtream");
+  const formLocal  = document.getElementById("form-local");
+  const labelM3u   = document.getElementById("label-m3u");
+  const labelXt    = document.getElementById("label-xtream");
+  const labelLocal = document.getElementById("label-local");
+
+  openBtn.addEventListener("click", () => {
+    panel.style.display = "block";
+    openBtn.style.display = "none";
+  });
+
+  closeBtn.addEventListener("click", () => {
+    panel.style.display = "none";
+    openBtn.style.display = "";
+  });
+
+  function switchType(type) {
+    const forms  = { m3u: formM3u, xtream: formXt, local_file: formLocal };
+    const labels = { m3u: labelM3u, xtream: labelXt, local_file: labelLocal };
+    Object.entries(forms).forEach(([t, f]) => {
+      if (f) f.classList.toggle("provider-form--hidden", t !== type);
+    });
+    Object.entries(labels).forEach(([t, l]) => {
+      if (l) l.classList.toggle("radio-option--active", t === type);
+    });
+  }
+
+  radioM3u.addEventListener("change",   () => switchType("m3u"));
+  radioXt.addEventListener("change",    () => switchType("xtream"));
+  radioLocal.addEventListener("change", () => switchType("local_file"));
+
+  // When switching to local_file tab, lazy-load the browser
+  radioLocal.addEventListener("change", () => {
+    const browser = document.getElementById("file-browser-add");
+    if (browser && !browser.dataset.loaded) loadBrowser(browser);
+  });
+
+  document.querySelectorAll(".edit-open-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.editId;
+      document.querySelectorAll(".edit-row").forEach(r => {
+        if (r.id !== "edit-row-" + id) r.style.display = "none";
+      });
+      const row = document.getElementById("edit-row-" + id);
+      if (row) {
+        const wasHidden = row.style.display === "none";
+        row.style.display = wasHidden ? "" : "none";
+        if (wasHidden) {
+          // init any file browsers in this edit row
+          row.querySelectorAll(".file-browser:not([data-loaded])").forEach(loadBrowser);
+        }
+      }
+    });
+  });
+
+  document.querySelectorAll(".cancel-edit-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const row = document.getElementById("edit-row-" + btn.dataset.editId);
+      if (row) row.style.display = "none";
+    });
+  });
+
+  // ── File Browser ──────────────────────────────────────────────────────────
+
+  async function loadBrowser(el, path) {
+    el.dataset.loaded = "1";
+    el.innerHTML = '<div class="fb-loading">Loading…</div>';
+    const url = "/providers/browse" + (path ? "?path=" + encodeURIComponent(path) : "");
+    let data;
+    try {
+      const res = await fetch(url);
+      data = await res.json();
+    } catch (e) {
+      el.innerHTML = '<div class="fb-error">Failed to load directory listing.</div>';
+      return;
+    }
+    if (data.error) {
+      el.innerHTML = `<div class="fb-error">${data.error}</div>`;
+      return;
+    }
+    renderBrowser(el, data);
+  }
+
+  function renderBrowser(el, data) {
+    const inputId = el.dataset.input;
+    const input   = document.getElementById(inputId);
+
+    // Determine the submit button associated with this browser
+    const form = el.closest("form");
+
+    let html = `<div class="fb-toolbar">
+      <span class="fb-path" title="${esc(data.current)}">${esc(data.current)}</span>
+    </div><div class="fb-list">`;
+
+    if (data.parent) {
+      html += `<div class="fb-item fb-item--dir" data-path="${esc(data.parent)}" data-type="dir">
+        <span class="fb-icon">&#8593;</span>
+        <span class="fb-name">..</span>
+      </div>`;
+    }
+
+    data.dirs.forEach(d => {
+      html += `<div class="fb-item fb-item--dir" data-path="${esc(d.path)}" data-type="dir">
+        <span class="fb-icon">&#128193;</span>
+        <span class="fb-name">${esc(d.name)}</span>
+      </div>`;
+    });
+
+    if (data.files.length === 0 && data.dirs.length === 0 && !data.parent) {
+      html += `<div class="fb-empty">No .m3u files or subdirectories found here.</div>`;
+    } else if (data.files.length === 0) {
+      html += `<div class="fb-empty">No .m3u files in this directory.</div>`;
+    }
+
+    data.files.forEach(f => {
+      const selected = input && input.value === f.path;
+      html += `<div class="fb-item fb-item--file ${selected ? "fb-item--selected" : ""}"
+        data-path="${esc(f.path)}" data-type="file">
+        <span class="fb-icon">&#128196;</span>
+        <span class="fb-name">${esc(f.name)}</span>
+      </div>`;
+    });
+
+    html += `</div>`;
+    el.innerHTML = html;
+
+    el.querySelectorAll(".fb-item").forEach(item => {
+      item.addEventListener("click", () => {
+        if (item.dataset.type === "dir") {
+          loadBrowser(el, item.dataset.path);
+        } else {
+          // select file
+          const path = item.dataset.path;
+          el.querySelectorAll(".fb-item--file").forEach(i => i.classList.remove("fb-item--selected"));
+          item.classList.add("fb-item--selected");
+
+          if (input) {
+            input.value = path;
+            // update the selected label
+            const selectedEl = document.getElementById("selected-" + inputId.replace("local-file-path-", "").replace("edit-file-path-", "edit-"));
+            // fallback: find sibling .file-browser-selected
+            const selectedSibling = el.closest(".form-group").querySelector(".file-browser-selected");
+            if (selectedSibling) {
+              selectedSibling.innerHTML = `<span class="file-browser-selected__icon">&#128196;</span>
+                <span class="file-browser-selected__path">${esc(path)}</span>`;
+            }
+          }
+
+          // enable submit button if present
+          if (form) {
+            const submitBtn = form.querySelector('[type="submit"]');
+            if (submitBtn) submitBtn.disabled = false;
+          }
+        }
+      });
+    });
+  }
+
+  function esc(str) {
+    return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  // Auto-init the add-form browser if local_file tab is already active on page load
+  if (radioLocal && radioLocal.checked) {
+    const browser = document.getElementById("file-browser-add");
+    if (browser) loadBrowser(browser);
+  }
+
+  // ── Disable provider modal ────────────────────────────────────────────────
+  const disableModal   = document.getElementById("disable-modal");
+  const disableForm    = document.getElementById("disable-modal-form");
+  const disableName    = document.getElementById("disable-modal-name");
+  const disableCancel  = document.getElementById("disable-modal-cancel");
+
+  document.querySelectorAll("[data-disable-slug]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      disableName.textContent = btn.dataset.disableName;
+      disableForm.action = "/providers/" + btn.dataset.disableSlug + "/disable";
+      disableModal.style.display = "flex";
+    });
+  });
+
+  disableCancel.addEventListener("click", () => {
+    disableModal.style.display = "none";
+  });
+
+  disableModal.addEventListener("click", e => {
+    if (e.target === disableModal) disableModal.style.display = "none";
+  });
+
+  // ── Details expand/collapse ───────────────────────────────────────────────
+  document.querySelectorAll(".details-toggle").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const el = document.getElementById("details-" + btn.dataset.details);
+      if (!el) return;
+      const open = el.style.display !== "none";
+      el.style.display = open ? "none" : "block";
+      btn.textContent = open ? btn.textContent.replace("Hide", "Show") : btn.textContent.replace("Show", "Hide");
+    });
+  });
+
+  // ── Quality Terms Widget ──────────────────────────────────────────────────
+
+  function initQualityWidget(id) {
+    const tagsEl  = document.getElementById("qtags-"   + id);
+    const addEl   = document.getElementById("qadd-"    + id);
+    const hidden  = document.getElementById("qhidden-" + id);
+    if (!tagsEl || !addEl || !hidden) return;
+
+    let terms = [];
+    try { terms = JSON.parse(hidden.value) || []; } catch(_) { terms = []; }
+
+    function renderTags() {
+      hidden.value = JSON.stringify(terms);
+      tagsEl.innerHTML = "";
+      if (terms.length === 0) {
+        tagsEl.innerHTML = '<span class="quality-empty">No terms — all streams overwrite unconditionally.</span>';
+        return;
+      }
+      terms.forEach((term, i) => {
+        const tag = document.createElement("span");
+        tag.className = "quality-tag";
+        tag.innerHTML = esc(term) +
+          '<button type="button" class="quality-tag__remove" aria-label="Remove ' + esc(term) + '">&times;</button>';
+        tag.querySelector("button").addEventListener("click", () => {
+          terms.splice(i, 1);
+          renderTags();
+        });
+        tagsEl.appendChild(tag);
+      });
+    }
+
+    function addTerm() {
+      const val = addEl.value.trim();
+      if (!val) return;
+      if (!terms.includes(val)) {
+        terms.push(val);
+        renderTags();
+      }
+      addEl.value = "";
+      addEl.focus();
+    }
+
+    document.querySelector('[data-qadd="' + id + '"]').addEventListener("click", addTerm);
+    addEl.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); addTerm(); } });
+
+    renderTags();
+  }
+
+  // Init widgets for all edit rows (provider slugs available from template)
+  {% for p in providers %}
+  initQualityWidget("{{ p.slug }}");
+  {% endfor %}
+
+  // Init add-form widgets
+  initQualityWidget("add-m3u");
+  initQualityWidget("add-xtream");
+  initQualityWidget("add-local");
+</script>
+{% endblock %}

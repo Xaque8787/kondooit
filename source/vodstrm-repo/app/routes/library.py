@@ -1,0 +1,2167 @@
+"""Library management routes — browse content, manage selections, manage follow rules."""
+import json
+import logging
+import os
+from typing import Optional
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+
+from app.auth.jwt_handler import TokenData, get_current_user
+from app.database import get_db
+from app.ingestion.sync import _delete_strm_file
+from app.template_engine import create_templates
+
+logger = logging.getLogger(__name__)
+
+# Cover art cascade expressed as a SQL subquery.
+# Level 1 — tvg-logo from any stream's metadata_json (provider-supplied)
+# Level 2 — TMDB poster via entries.tmdb_id / entries.tmdb_type
+# Level 3 — NULL (caller renders placeholder)
+_COVER_ART_SUBQUERY = """
+    COALESCE(
+        (SELECT json_extract(_sm.metadata_json, '$.tvg-logo')
+         FROM streams _sm
+         WHERE _sm.entry_id = e.entry_id
+           AND json_extract(_sm.metadata_json, '$.tvg-logo') IS NOT NULL
+           AND json_extract(_sm.metadata_json, '$.tvg-logo') != ''
+         LIMIT 1),
+        CASE
+            WHEN e.tmdb_type = 'show'
+            THEN (SELECT 'https://image.tmdb.org/t/p/w500' || ts.poster_path
+                  FROM tmdb_shows ts
+                  WHERE ts.tmdb_id = e.tmdb_id AND ts.poster_path IS NOT NULL
+                  LIMIT 1)
+            WHEN e.tmdb_type = 'movie'
+            THEN (SELECT 'https://image.tmdb.org/t/p/w500' || tm.poster_path
+                  FROM tmdb_movies tm
+                  WHERE tm.tmdb_id = e.tmdb_id AND tm.poster_path IS NOT NULL
+                  LIMIT 1)
+        END
+    )
+"""
+
+# For group queries (series/tv_vod) we pick the best cover art across the group:
+# prefer any TMDB poster (consistent canonical image), then fall back to tvg-logo.
+_COVER_ART_GROUP_SUBQUERY = """
+    COALESCE(
+        (SELECT 'https://image.tmdb.org/t/p/w500' || ts.poster_path
+         FROM entries _eg
+         JOIN tmdb_shows ts ON ts.tmdb_id = _eg.tmdb_id
+         WHERE _eg.cleaned_title = e.cleaned_title
+                     AND _eg.type = e.type
+           AND _eg.tmdb_type = 'show'
+           AND ts.poster_path IS NOT NULL
+         LIMIT 1),
+        (SELECT 'https://image.tmdb.org/t/p/w500' || tm.poster_path
+         FROM entries _em
+         JOIN tmdb_movies tm ON tm.tmdb_id = _em.tmdb_id
+         WHERE _em.cleaned_title = e.cleaned_title
+                     AND _em.type = e.type
+           AND _em.tmdb_type = 'movie'
+           AND tm.poster_path IS NOT NULL
+         LIMIT 1),
+        (SELECT json_extract(_sg.metadata_json, '$.tvg-logo')
+         FROM streams _sg
+         JOIN entries _esg ON _esg.entry_id = _sg.entry_id
+         WHERE _esg.cleaned_title = e.cleaned_title
+                     AND _esg.type = e.type
+           AND json_extract(_sg.metadata_json, '$.tvg-logo') IS NOT NULL
+           AND json_extract(_sg.metadata_json, '$.tvg-logo') != ''
+         LIMIT 1)
+    )
+"""
+
+router = APIRouter(prefix="/library")
+templates = create_templates()
+
+
+# ---------------------------------------------------------------------------
+# Page
+# ---------------------------------------------------------------------------
+
+@router.get("", response_class=HTMLResponse)
+async def library_page(
+    request: Request,
+    current_user: TokenData = Depends(get_current_user),
+):
+    from app.routes.integrations import _load_downloads_settings
+    with get_db() as conn:
+        dl_settings = _load_downloads_settings(conn)
+    return templates.TemplateResponse(
+        "library/index.html",
+        {
+            "request": request,
+            "current_user": current_user,
+            "dl_enabled": dl_settings.get("enabled", True),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Content browse endpoints (JSON)
+# ---------------------------------------------------------------------------
+
+# Subquery: entry has at least one browsable stream from an active provider.
+# Import actions remain restricted to import_selected providers by the
+# dedicated can-add/remove queries below; this predicate only controls whether
+# content appears in the Library browser.
+_HAS_ACTIVE_STREAM = """
+    EXISTS (
+        SELECT 1 FROM streams _s
+        JOIN providers _p ON _p.slug = _s.provider
+        WHERE _s.entry_id = e.entry_id
+          AND _p.is_active = 1
+          AND (_s.include_only_active = 0 OR _s.include_only = 1)
+    )
+"""
+
+# Subquery: can_add — entry has an unimported, non-excluded, include_only-eligible
+# stream from an active import_selected provider
+_CAN_ADD_SUBQUERY = """
+    (SELECT COUNT(*) FROM streams _s2
+     JOIN providers _p2 ON _p2.slug = _s2.provider
+     WHERE _s2.entry_id = e.entry_id
+       AND _p2.strm_mode = 'import_selected' AND _p2.is_active = 1
+       AND _s2.exclude = 0 AND _s2.imported = 0
+       AND (_s2.include_only_active = 0 OR _s2.include_only = 1))
+"""
+
+# Subquery: download status for this entry (NULL if no download row)
+_DOWNLOAD_STATUS_SUBQUERY = """
+    (SELECT _dl.status FROM downloads _dl WHERE _dl.entry_id = e.entry_id)
+"""
+
+# Episode title from the highest-priority active, eligible provider stream.
+_EPISODE_TITLE_SUBQUERY = """
+        (SELECT NULLIF(TRIM(json_extract(_se.metadata_json, '$."episode-title"')), '')
+         FROM streams _se
+         JOIN providers _pe ON _pe.slug = _se.provider
+         WHERE _se.entry_id = e.entry_id
+             AND _pe.is_active = 1
+             AND _se.exclude = 0
+             AND (_se.include_only_active = 0 OR _se.include_only = 1)
+             AND NULLIF(TRIM(json_extract(_se.metadata_json, '$."episode-title"')), '') IS NOT NULL
+         ORDER BY _pe.priority, _pe.slug
+         LIMIT 1)
+"""
+
+# Subquery: filtered_title from the highest-priority eligible import_selected stream.
+# This mirrors the STRM engine's priority resolution so the displayed title matches
+# what will be written to disk.
+_FILTERED_TITLE_SUBQUERY = """
+    (SELECT _sf.filtered_title FROM streams _sf
+     JOIN providers _pf ON _pf.slug = _sf.provider
+     WHERE _sf.entry_id = e.entry_id
+       AND _pf.strm_mode = 'import_selected' AND _pf.is_active = 1
+       AND _sf.exclude = 0
+       AND (_sf.include_only_active = 0 OR _sf.include_only = 1)
+       AND _sf.filtered_title IS NOT NULL AND _sf.filtered_title != ''
+     ORDER BY _pf.priority, _pf.slug
+     LIMIT 1)
+"""
+
+# Subquery: owner_slug for individual entries.
+# For non-live types: use strm_path (written to disk by the STRM engine).
+# For live entries: live channels are owned when any eligible stream exists
+# (generate_all: non-excluded; import_selected: imported=1). Returns the
+# highest-priority eligible provider slug, or NULL if none.
+_OWNER_SLUG_SUBQUERY = """
+    CASE WHEN e.type = 'live' THEN (
+        SELECT _sl.provider FROM streams _sl
+        JOIN providers _pl ON _pl.slug = _sl.provider
+        WHERE _sl.entry_id = e.entry_id
+          AND _pl.is_active = 1
+          AND _sl.exclude = 0
+          AND (_sl.include_only_active = 0 OR _sl.include_only = 1)
+          AND (
+              _pl.strm_mode = 'generate_all'
+              OR (_pl.strm_mode = 'import_selected' AND _sl.imported = 1)
+          )
+        ORDER BY _pl.priority, _pl.slug
+        LIMIT 1
+    ) ELSE (
+        SELECT s3.provider FROM streams s3
+        WHERE s3.entry_id = e.entry_id AND s3.strm_path IS NOT NULL
+        LIMIT 1
+    ) END
+"""
+
+
+@router.get("/entries", response_class=JSONResponse)
+async def list_entries(
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=48, ge=1, le=200),
+    type: str = Query(default=""),
+    search: str = Query(default=""),
+    owned: str = Query(default=""),
+    downloaded: str = Query(default=""),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """
+    Return browsable content from all active providers.
+
+    Series are grouped by cleaned_title so one card represents the entire show.
+    """
+    offset = (page - 1) * per_page
+    conditions = []
+    params: list = []
+
+    type_filter = type.strip()
+
+    if type_filter == "series":
+        base_condition = "e.type = 'series'"
+    elif type_filter and type_filter != "tv_vod":
+        base_condition = "e.type = ?"
+        params.append(type_filter)
+    else:
+        base_condition = "1=1"
+
+    if search:
+        conditions.append("lower(e.cleaned_title) LIKE lower(?)")
+        params.append(f"%{search}%")
+
+    _OWNED_EXISTS = """
+        EXISTS (
+            SELECT 1 FROM streams _so
+            JOIN providers _po ON _po.slug = _so.provider
+            WHERE _so.entry_id = e.entry_id
+              AND _po.is_active = 1
+              AND (_so.include_only_active = 0 OR _so.include_only = 1)
+              AND (
+                  CASE WHEN e.type = 'live' THEN (
+                      _so.exclude = 0
+                      AND (
+                          _po.strm_mode = 'generate_all'
+                          OR (_po.strm_mode = 'import_selected' AND _so.imported = 1)
+                      )
+                  ) ELSE (
+                      _so.strm_path IS NOT NULL
+                  ) END
+              )
+        )
+    """
+    if owned == "true":
+        conditions.append(_OWNED_EXISTS)
+    elif owned == "false":
+        conditions.append(f"NOT {_OWNED_EXISTS}")
+
+    # Downloaded filter — completed downloads (individual entries) or any
+    # completed download within the group (series / tv_vod grouped by title).
+    _DOWNLOADED_EXISTS = """
+        EXISTS (
+            SELECT 1 FROM downloads _d2
+            JOIN entries _e2 ON _e2.entry_id = _d2.entry_id
+            WHERE _d2.status = 'completed'
+              AND (
+                  _e2.entry_id = e.entry_id
+                  OR (e.type IN ('series','tv_vod')
+                      AND lower(_e2.cleaned_title) = lower(e.cleaned_title))
+              )
+        )
+    """
+    if downloaded == "true":
+        conditions.append(_DOWNLOADED_EXISTS)
+    elif downloaded == "false":
+        conditions.append(f"NOT {_DOWNLOADED_EXISTS}")
+
+    # Only show content supplied by an active, include-only-eligible provider.
+    conditions.append(_HAS_ACTIVE_STREAM)
+
+    extra_where = (" AND " + " AND ".join(conditions)) if conditions else ""
+
+    with get_db() as conn:
+        if type_filter == "series":
+            total = _series_card_count(conn, search, owned, downloaded)
+            rows = _series_card_rows(
+                conn, search, owned, downloaded, per_page, offset
+            )
+            entries = [_format_series_group(r) for r in rows]
+
+        elif type_filter == "tv_vod":
+            tv_query = _tv_vod_group_query(extra_where, paginated=True)
+            total = conn.execute(
+                _group_count_query("tv_vod", extra_where), params
+            ).fetchone()[0]
+            rows = conn.execute(
+                tv_query, params + [per_page, offset]
+            ).fetchall()
+            entries = [_format_tv_vod_group(r) for r in rows]
+
+        elif type_filter == "":
+            # All types: series groups + tv_vod groups + individual items
+            tv_query = _tv_vod_group_query(extra_where, paginated=True)
+            individual_query = f"""
+                SELECT
+                    e.entry_id, e.type, e.cleaned_title, e.year,
+                    e.season, e.episode,
+                    {_COVER_ART_SUBQUERY} AS cover_art,
+                    {_FILTERED_TITLE_SUBQUERY} AS filtered_title,
+                    {_OWNER_SLUG_SUBQUERY} AS owner_slug,
+                    (SELECT COUNT(*) FROM streams s3 WHERE s3.entry_id = e.entry_id) AS stream_count,
+                    {_CAN_ADD_SUBQUERY} AS can_add_count,
+                    {_DOWNLOAD_STATUS_SUBQUERY} AS download_status
+                FROM entries e
+                WHERE e.type NOT IN ('series', 'tv_vod') {extra_where}
+                ORDER BY e.cleaned_title
+            """
+            series_count = _series_card_count(conn, search, owned, downloaded)
+            tv_count = conn.execute(
+                _group_count_query("tv_vod", extra_where), params
+            ).fetchone()[0]
+            individual_count = conn.execute(
+                f"""
+                SELECT COUNT(*) FROM entries e
+                WHERE e.type NOT IN ('series', 'tv_vod') {extra_where}
+                """,
+                params,
+            ).fetchone()[0]
+            total = series_count + tv_count + individual_count
+
+            # Paginate across the three result sets in order
+            series_rows = _series_card_rows(
+                conn, search, owned, downloaded, per_page, offset
+            )
+            remaining = per_page - len(series_rows)
+            tv_offset = max(0, offset - series_count)
+            tv_rows = []
+            if remaining > 0:
+                tv_rows = conn.execute(
+                    tv_query, params + [remaining, tv_offset]
+                ).fetchall()
+            remaining -= len(tv_rows)
+            indiv_offset = max(0, offset - series_count - tv_count)
+            indiv_rows = []
+            if remaining > 0:
+                indiv_rows = conn.execute(individual_query + " LIMIT ? OFFSET ?", params + [remaining, indiv_offset]).fetchall()
+
+            entries = (
+                [_format_series_group(r) for r in series_rows]
+                + [_format_tv_vod_group(r) for r in tv_rows]
+                + [_format_individual(r) for r in indiv_rows]
+            )
+
+        else:
+            q = f"""
+                SELECT
+                    e.entry_id, e.type, e.cleaned_title, e.year,
+                    e.season, e.episode,
+                    {_COVER_ART_SUBQUERY} AS cover_art,
+                    {_FILTERED_TITLE_SUBQUERY} AS filtered_title,
+                    {_OWNER_SLUG_SUBQUERY} AS owner_slug,
+                    (SELECT COUNT(*) FROM streams s3 WHERE s3.entry_id = e.entry_id) AS stream_count,
+                    {_CAN_ADD_SUBQUERY} AS can_add_count,
+                    {_DOWNLOAD_STATUS_SUBQUERY} AS download_status
+                FROM entries e
+                WHERE {base_condition} {extra_where}
+                ORDER BY e.cleaned_title
+            """
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM entries e WHERE {base_condition} {extra_where}",
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(q + " LIMIT ? OFFSET ?", params + [per_page, offset]).fetchall()
+            entries = [_format_individual(r) for r in rows]
+
+    return JSONResponse(
+        {
+            "entries": entries,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/counts", response_class=JSONResponse)
+async def library_counts(
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Return card counts for the Library content navigator."""
+    extra_where = " AND " + _HAS_ACTIVE_STREAM
+    with get_db() as conn:
+        series = _series_card_count(conn, "", "", "")
+        tv_vod = conn.execute(
+            _group_count_query("tv_vod", extra_where)
+        ).fetchone()[0]
+        counts = {"series": series, "tv_vod": tv_vod}
+        for entry_type in ("movie", "live", "unsorted"):
+            counts[entry_type] = conn.execute(
+                f"""
+                SELECT COUNT(*) FROM entries e
+                WHERE e.type = ? {extra_where}
+                """,
+                (entry_type,),
+            ).fetchone()[0]
+    counts["all"] = sum(counts.values())
+    return JSONResponse(counts)
+
+
+def _group_count_query(entry_type: str, extra_where: str) -> str:
+    """Count Library cards without evaluating cover/ownership card decoration."""
+    return f"""
+        SELECT COUNT(*) FROM (
+            SELECT e.cleaned_title
+            FROM entries e
+            WHERE e.type = '{entry_type}' {extra_where}
+            GROUP BY e.cleaned_title
+        )
+    """
+
+
+def _series_title_source(search: str) -> tuple[str, list[str]]:
+    catalog_search = ""
+    entry_search = ""
+    params: list[str] = []
+    if search:
+        pattern = f"%{search}%"
+        catalog_search = "AND c.title_key LIKE lower(?)"
+        entry_search = "AND lower(e.cleaned_title) LIKE lower(?)"
+        params.extend((pattern, pattern))
+
+    return f"""
+        WITH known_series AS (
+                 SELECT c.title_key,
+                     MIN(c.series_name) AS cleaned_title,
+                   NULLIF(MAX(c.cover), '') AS catalog_cover
+            FROM xtream_series_catalog c
+            JOIN providers p ON p.slug = c.provider_slug
+            WHERE p.is_active = 1 {catalog_search}
+            GROUP BY c.title_key
+
+            UNION ALL
+
+                 SELECT lower(e.cleaned_title) AS title_key,
+                     MIN(e.cleaned_title) AS cleaned_title,
+                     NULL AS catalog_cover
+            FROM entries e
+            WHERE e.type = 'series'
+              AND {_HAS_ACTIVE_STREAM}
+              {entry_search}
+            GROUP BY lower(e.cleaned_title)
+        ),
+        series_titles AS (
+                 SELECT title_key,
+                   MIN(cleaned_title) AS cleaned_title,
+                   MAX(catalog_cover) AS catalog_cover
+            FROM known_series
+            WHERE cleaned_title IS NOT NULL AND trim(cleaned_title) != ''
+            GROUP BY title_key
+        )
+    """, params
+
+
+def _series_title_filters(owned: str, downloaded: str) -> str:
+    filters: list[str] = []
+    owned_exists = """
+        EXISTS (
+            SELECT 1 FROM entries e
+            JOIN streams s ON s.entry_id = e.entry_id
+            JOIN providers p ON p.slug = s.provider
+            WHERE e.type = 'series'
+              AND lower(e.cleaned_title) = st.title_key
+              AND p.is_active = 1
+              AND s.strm_path IS NOT NULL
+        )
+    """
+    if owned == "true":
+        filters.append(owned_exists)
+    elif owned == "false":
+        filters.append(f"NOT {owned_exists}")
+
+    downloaded_exists = """
+        EXISTS (
+            SELECT 1 FROM entries e
+            JOIN downloads d ON d.entry_id = e.entry_id
+            WHERE e.type = 'series'
+              AND lower(e.cleaned_title) = st.title_key
+              AND d.status = 'completed'
+        )
+    """
+    if downloaded == "true":
+        filters.append(downloaded_exists)
+    elif downloaded == "false":
+        filters.append(f"NOT {downloaded_exists}")
+    return ("WHERE " + " AND ".join(filters)) if filters else ""
+
+
+def _series_card_count(
+    conn, search: str, owned: str, downloaded: str
+) -> int:
+    source, params = _series_title_source(search)
+    filters = _series_title_filters(owned, downloaded)
+    return conn.execute(
+        f"{source} SELECT COUNT(*) FROM series_titles st {filters}", params
+    ).fetchone()[0]
+
+
+def _series_card_rows(
+    conn,
+    search: str,
+    owned: str,
+    downloaded: str,
+    limit: int,
+    offset: int,
+):
+    source, params = _series_title_source(search)
+    filters = _series_title_filters(owned, downloaded)
+    return conn.execute(
+        f"""
+        {source},
+        selected_titles AS MATERIALIZED (
+            SELECT st.* FROM series_titles st
+            {filters}
+            ORDER BY st.cleaned_title
+            LIMIT ? OFFSET ?
+        )
+        SELECT
+            st.cleaned_title,
+            NULL AS filtered_title,
+            'series' AS type,
+            (SELECT MIN(e.year) FROM entries e
+             WHERE e.type='series' AND lower(e.cleaned_title)=st.title_key) AS year,
+            (SELECT COUNT(DISTINCT e.season) FROM entries e
+             WHERE e.type='series' AND lower(e.cleaned_title)=st.title_key) AS season_count,
+            (SELECT COUNT(*) FROM entries e
+             WHERE e.type='series' AND lower(e.cleaned_title)=st.title_key) AS episode_count,
+            COALESCE(
+                (SELECT 'https://image.tmdb.org/t/p/w500' || tm.poster_path
+                 FROM entries e JOIN tmdb_shows tm ON tm.tmdb_id=e.tmdb_id
+                 WHERE e.type='series' AND lower(e.cleaned_title)=st.title_key
+                   AND e.tmdb_type='show' AND tm.poster_path IS NOT NULL LIMIT 1),
+                st.catalog_cover,
+                (SELECT json_extract(s.metadata_json, '$.tvg-logo')
+                 FROM entries e JOIN streams s ON s.entry_id=e.entry_id
+                 WHERE e.type='series' AND lower(e.cleaned_title)=st.title_key
+                   AND json_valid(s.metadata_json)
+                   AND COALESCE(json_extract(s.metadata_json, '$.tvg-logo'),'') != ''
+                 LIMIT 1)
+            ) AS cover_art,
+            (SELECT COUNT(*) FROM entries e
+             WHERE e.type='series' AND lower(e.cleaned_title)=st.title_key
+               AND EXISTS (SELECT 1 FROM streams s
+                           WHERE s.entry_id=e.entry_id AND s.strm_path IS NOT NULL)) AS owned_count,
+            (SELECT COUNT(*) FROM entries e
+             WHERE e.type='series' AND lower(e.cleaned_title)=st.title_key
+               AND {_CAN_ADD_SUBQUERY} > 0) AS can_add_count,
+            (SELECT COUNT(*) FROM entries e JOIN downloads d ON d.entry_id=e.entry_id
+             WHERE e.type='series' AND lower(e.cleaned_title)=st.title_key
+               AND d.status='completed') AS download_completed_count
+        FROM selected_titles st
+        ORDER BY st.cleaned_title
+        """,
+        params + [limit, offset],
+    ).fetchall()
+
+
+def _series_group_query(extra_where: str, paginated: bool = False) -> str:
+    prefix = ""
+    source = "entries e"
+    if paginated:
+        prefix = f"""
+        WITH eligible_entries AS MATERIALIZED (
+            SELECT e.* FROM entries e
+            WHERE e.type = 'series' {extra_where}
+        ),
+        selected_titles AS MATERIALIZED (
+            SELECT e.cleaned_title
+            FROM eligible_entries e
+            GROUP BY e.cleaned_title
+            ORDER BY e.cleaned_title
+            LIMIT ? OFFSET ?
+        )
+        """
+        source = "eligible_entries e JOIN selected_titles _selected ON _selected.cleaned_title = e.cleaned_title"
+        where = ""
+    else:
+        where = f"WHERE e.type = 'series' {extra_where}"
+    return f"""
+        {prefix}
+        SELECT
+            e.cleaned_title,
+            MIN({_FILTERED_TITLE_SUBQUERY}) AS filtered_title,
+            'series' AS type,
+            MIN(e.year) AS year,
+            COUNT(DISTINCT e.season) AS season_count,
+            COUNT(e.entry_id) AS episode_count,
+            {_COVER_ART_GROUP_SUBQUERY} AS cover_art,
+            SUM(CASE WHEN s2.strm_path IS NOT NULL THEN 1 ELSE 0 END) AS owned_count,
+            SUM(CASE WHEN _p2.strm_mode = 'import_selected' AND _p2.is_active = 1
+                          AND s2.exclude = 0 AND s2.imported = 0
+                          AND (s2.include_only_active = 0 OR s2.include_only = 1)
+                     THEN 1 ELSE 0 END) AS can_add_count,
+            (SELECT COUNT(*) FROM downloads _dl2
+             JOIN entries _e2 ON _e2.entry_id = _dl2.entry_id
+             WHERE _e2.type = 'series' AND lower(_e2.cleaned_title) = lower(e.cleaned_title)
+               AND _dl2.status = 'completed') AS download_completed_count
+        FROM {source}
+        LEFT JOIN streams s2 ON s2.entry_id = e.entry_id
+        LEFT JOIN providers _p2 ON _p2.slug = s2.provider
+        {where}
+        GROUP BY e.cleaned_title
+        ORDER BY e.cleaned_title
+    """
+
+
+def _tv_vod_group_query(extra_where: str, paginated: bool = False) -> str:
+    prefix = ""
+    source = "entries e"
+    if paginated:
+        prefix = f"""
+        WITH eligible_entries AS MATERIALIZED (
+            SELECT e.* FROM entries e
+            WHERE e.type = 'tv_vod' {extra_where}
+        ),
+        selected_titles AS MATERIALIZED (
+            SELECT e.cleaned_title
+            FROM eligible_entries e
+            GROUP BY e.cleaned_title
+            ORDER BY e.cleaned_title
+            LIMIT ? OFFSET ?
+        )
+        """
+        source = "eligible_entries e JOIN selected_titles _selected ON _selected.cleaned_title = e.cleaned_title"
+        where = ""
+    else:
+        where = f"WHERE e.type = 'tv_vod' {extra_where}"
+    return f"""
+        {prefix}
+        SELECT
+            e.cleaned_title,
+            MIN({_FILTERED_TITLE_SUBQUERY}) AS filtered_title,
+            'tv_vod' AS type,
+            COUNT(DISTINCT substr(e.air_date, 1, 4)) AS year_count,
+            COUNT(e.entry_id) AS episode_count,
+            {_COVER_ART_GROUP_SUBQUERY} AS cover_art,
+            SUM(CASE WHEN s2.strm_path IS NOT NULL THEN 1 ELSE 0 END) AS owned_count,
+            SUM(CASE WHEN _p2.strm_mode = 'import_selected' AND _p2.is_active = 1
+                          AND s2.exclude = 0 AND s2.imported = 0
+                          AND (s2.include_only_active = 0 OR s2.include_only = 1)
+                     THEN 1 ELSE 0 END) AS can_add_count,
+            (SELECT COUNT(*) FROM downloads _dl2
+             JOIN entries _e2 ON _e2.entry_id = _dl2.entry_id
+             WHERE _e2.type = 'tv_vod' AND lower(_e2.cleaned_title) = lower(e.cleaned_title)
+               AND _dl2.status = 'completed') AS download_completed_count
+        FROM {source}
+        LEFT JOIN streams s2 ON s2.entry_id = e.entry_id
+        LEFT JOIN providers _p2 ON _p2.slug = s2.provider
+        {where}
+        GROUP BY e.cleaned_title
+        ORDER BY e.cleaned_title
+    """
+
+
+def _display_title(r) -> str:
+    try:
+        ft = r["filtered_title"]
+    except IndexError:
+        ft = None
+    return (ft or r["cleaned_title"] or "").strip() or (r["cleaned_title"] or "")
+
+
+def _format_series_group(r) -> dict:
+    episode_count = r["episode_count"] or 0
+    return {
+        "entry_id": None,
+        "type": "series",
+        "cleaned_title": r["cleaned_title"],   # kept for API lookups (URLs use this)
+        "display_title": _display_title(r),
+        "year": r["year"],
+        "season_count": r["season_count"],
+        "episode_count": episode_count,
+        "episodes_loaded": episode_count > 0,
+        "cover_art": r["cover_art"],
+        "is_owned": (r["owned_count"] or 0) > 0,
+        "owned_count": r["owned_count"] or 0,
+        "can_add": (r["can_add_count"] or 0) > 0,
+        "download_completed": (r["download_completed_count"] or 0) > 0,
+        "is_series_group": True,
+    }
+
+
+def _series_detail_metadata(conn, title: str):
+    return conn.execute(
+        """
+        SELECT
+            COALESCE(
+                (SELECT MIN(e.year) FROM entries e
+                 WHERE e.type='series' AND lower(e.cleaned_title)=lower(?)),
+                (SELECT NULLIF(CAST(substr(COALESCE(
+                            json_extract(c.metadata_json, '$.releaseDate'),
+                            json_extract(c.metadata_json, '$.release_date'),
+                            json_extract(c.metadata_json, '$.year'), ''
+                        ), 1, 4) AS INTEGER), 0)
+                 FROM xtream_series_catalog c
+                 JOIN providers p ON p.slug=c.provider_slug
+                 WHERE p.is_active=1 AND lower(c.series_name)=lower(?)
+                 ORDER BY p.priority, p.slug LIMIT 1)
+            ) AS year,
+            COALESCE(
+                (SELECT p.name FROM entries e
+                 JOIN streams s ON s.entry_id=e.entry_id
+                 JOIN providers p ON p.slug=s.provider
+                 WHERE e.type='series' AND lower(e.cleaned_title)=lower(?)
+                   AND p.is_active=1 AND s.exclude=0
+                   AND (s.include_only_active=0 OR s.include_only=1)
+                 ORDER BY p.priority, p.slug LIMIT 1),
+                (SELECT p.name FROM xtream_series_catalog c
+                 JOIN providers p ON p.slug=c.provider_slug
+                 WHERE p.is_active=1 AND lower(c.series_name)=lower(?)
+                 ORDER BY p.priority, p.slug LIMIT 1)
+            ) AS provider_name
+        """,
+        (title, title, title, title),
+    ).fetchone()
+
+
+def _format_tv_vod_group(r) -> dict:
+    return {
+        "entry_id": None,
+        "type": "tv_vod",
+        "cleaned_title": r["cleaned_title"],
+        "display_title": _display_title(r),
+        "year_count": r["year_count"],
+        "episode_count": r["episode_count"],
+        "cover_art": r["cover_art"],
+        "is_owned": (r["owned_count"] or 0) > 0,
+        "owned_count": r["owned_count"] or 0,
+        "can_add": (r["can_add_count"] or 0) > 0,
+        "download_completed": (r["download_completed_count"] or 0) > 0,
+        "is_tv_vod_group": True,
+        "is_series_group": False,
+    }
+
+
+def _format_individual(r) -> dict:
+    dl_status = r["download_status"] if "download_status" in r.keys() else None
+    return {
+        "entry_id": r["entry_id"],
+        "type": r["type"],
+        "cleaned_title": r["cleaned_title"],
+        "display_title": _display_title(r),
+        "year": r["year"],
+        "season": r["season"],
+        "episode": r["episode"],
+        "cover_art": r["cover_art"],
+        "is_owned": r["owner_slug"] is not None,
+        "owner_slug": r["owner_slug"],
+        "stream_count": r["stream_count"],
+        "can_add": (r["can_add_count"] or 0) > 0,
+        "is_series_group": False,
+        "download_status": dl_status,
+        "is_downloaded": dl_status in ("probing", "downloading"),
+        "download_completed": dl_status == "completed",
+        "download_pending": dl_status in ("pending", "failed"),
+    }
+
+
+@router.get("/entries/{entry_id}/details", response_class=JSONResponse)
+async def entry_details(
+    entry_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Return entry metadata and its highest-priority playable stream URL."""
+    with get_db() as conn:
+        entry = conn.execute(
+            f"""
+            SELECT e.entry_id, e.type, e.cleaned_title, e.raw_title, e.year,
+                   e.season, e.episode, e.air_date,
+                   {_COVER_ART_SUBQUERY} AS cover_art
+            FROM entries e
+            WHERE e.entry_id = ?
+            """,
+            (entry_id,),
+        ).fetchone()
+        if not entry:
+            return JSONResponse({"error": "Entry not found"}, status_code=404)
+
+        stream = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(s.last_written_url, ''), s.stream_url) AS stream_url,
+                   p.name AS provider_name, s.provider AS provider_slug,
+                   s.strm_path
+            FROM streams s
+            JOIN providers p ON p.slug = s.provider
+            WHERE s.entry_id = ?
+              AND p.is_active = 1
+              AND s.exclude = 0
+              AND (s.include_only_active = 0 OR s.include_only = 1)
+            ORDER BY
+                CASE WHEN s.strm_path IS NOT NULL THEN 0 ELSE 1 END,
+                p.priority,
+                p.slug
+            LIMIT 1
+            """,
+            (entry_id,),
+        ).fetchone()
+
+    return JSONResponse(
+        {
+            "entry_id": entry["entry_id"],
+            "type": entry["type"],
+            "title": entry["cleaned_title"],
+            "raw_title": entry["raw_title"],
+            "year": entry["year"],
+            "season": entry["season"],
+            "episode": entry["episode"],
+            "air_date": entry["air_date"],
+            "cover_art": entry["cover_art"],
+            "stream_url": stream["stream_url"] if stream else None,
+            "provider": stream["provider_name"] if stream else None,
+            "provider_slug": stream["provider_slug"] if stream else None,
+            "strm_generated": bool(stream and stream["strm_path"]),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.get("/series/{title}/seasons", response_class=JSONResponse)
+async def list_seasons(
+    title: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Return seasons for a series title with per-season ownership info."""
+    with get_db() as conn:
+        existing = conn.execute(
+            """
+            SELECT 1 FROM entries
+            WHERE type='series' AND lower(cleaned_title)=lower(?)
+            LIMIT 1
+            """,
+            (title,),
+        ).fetchone()
+
+    try:
+        from app.ingestion.xtream_native import ensure_series_loaded
+
+        ensure_series_loaded(title)
+    except Exception as exc:
+        logger.error(
+            "[LIBRARY] Lazy series load failed for title=%r (%s)",
+            title,
+            type(exc).__name__,
+        )
+        if existing is None:
+            return JSONResponse(
+                {"error": "Episode details could not be loaded"}, status_code=502
+            )
+
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                e.season,
+                COUNT(DISTINCT COALESCE({_EPISODE_TITLE_SUBQUERY}, e.entry_id)) AS episode_count,
+                {_COVER_ART_GROUP_SUBQUERY} AS cover_art,
+                COUNT(DISTINCT CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM streams _so
+                        WHERE _so.entry_id=e.entry_id
+                          AND _so.strm_path IS NOT NULL
+                    )
+                    THEN COALESCE({_EPISODE_TITLE_SUBQUERY}, e.entry_id)
+                END) AS owned_count,
+                SUM(CASE WHEN p.strm_mode = 'import_selected' AND p.is_active = 1
+                              AND s.exclude = 0 AND s.imported = 0
+                              AND (s.include_only_active = 0 OR s.include_only = 1)
+                         THEN 1 ELSE 0 END) AS can_add_count,
+                (SELECT COUNT(*) FROM downloads _dl
+                 JOIN entries _e ON _e.entry_id = _dl.entry_id
+                 WHERE _e.type = 'series' AND lower(_e.cleaned_title) = lower(e.cleaned_title)
+                   AND _e.season = e.season
+                   AND _dl.status = 'completed') AS download_completed_count
+            FROM entries e
+            LEFT JOIN streams s ON s.entry_id = e.entry_id
+            LEFT JOIN providers p ON p.slug = s.provider
+            WHERE e.type = 'series' AND lower(e.cleaned_title) = lower(?)
+            GROUP BY e.season
+            ORDER BY e.season
+            """,
+            (title,),
+        ).fetchall()
+
+        # Follow state: all-seasons rule and per-season rules
+        follows = conn.execute(
+            """
+            SELECT f.season FROM follows f
+            WHERE lower(f.entry_title) = lower(?) AND f.entry_type = 'series'
+            """,
+            (title,),
+        ).fetchall()
+
+        metadata = _series_detail_metadata(conn, title)
+
+    followed_all = any(f["season"] is None for f in follows)
+    followed_seasons = {f["season"] for f in follows if f["season"] is not None}
+
+    seasons = []
+    for r in rows:
+        snum = r["season"]
+        seasons.append({
+            "season": snum,
+            "episode_count": r["episode_count"],
+            "cover_art": r["cover_art"],
+            "owned_count": r["owned_count"] or 0,
+            "is_owned": (r["owned_count"] or 0) > 0,
+            "can_add": (r["can_add_count"] or 0) > 0,
+            "download_completed": (r["download_completed_count"] or 0) > 0,
+            "is_following": followed_all or (snum in followed_seasons),
+        })
+
+    return JSONResponse({
+        "title": title,
+        "year": metadata["year"] if metadata else None,
+        "provider": metadata["provider_name"] if metadata else None,
+        "seasons": seasons,
+        "is_following_all": followed_all,
+    })
+
+
+@router.get("/series/{title}/seasons/{season}/episodes", response_class=JSONResponse)
+async def list_episodes(
+    title: str,
+    season: int,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Return individual episodes for a given series title + season."""
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                e.entry_id, e.episode,
+                {_COVER_ART_SUBQUERY} AS cover_art,
+                (SELECT s2.provider FROM streams s2 WHERE s2.entry_id = e.entry_id AND s2.strm_path IS NOT NULL LIMIT 1) AS owner_slug,
+                (SELECT COUNT(*) FROM streams s2 WHERE s2.entry_id = e.entry_id) AS stream_count,
+                (SELECT COUNT(*) FROM streams s2
+                 JOIN providers p2 ON p2.slug = s2.provider
+                 WHERE s2.entry_id = e.entry_id
+                   AND p2.strm_mode = 'import_selected' AND p2.is_active = 1
+                   AND s2.exclude = 0 AND s2.imported = 0
+                   AND (s2.include_only_active = 0 OR s2.include_only = 1)
+                ) AS can_add_count,
+                {_EPISODE_TITLE_SUBQUERY} AS episode_name,
+                (SELECT _dl.status FROM downloads _dl WHERE _dl.entry_id = e.entry_id) AS download_status
+            FROM entries e
+            WHERE e.type = 'series'
+              AND lower(e.cleaned_title) = lower(?)
+              AND e.season = ?
+            ORDER BY e.episode
+            """,
+            (title, season),
+        ).fetchall()
+
+    episodes = []
+    seen_names = set()
+    for r in rows:
+        episode_name = (r["episode_name"] or "").strip() or None
+        name_key = episode_name.casefold() if episode_name else None
+        if name_key and name_key in seen_names:
+            continue
+        if name_key:
+            seen_names.add(name_key)
+        episodes.append({
+            "entry_id": r["entry_id"],
+            "episode": len(episodes) + 1,
+            "cover_art": r["cover_art"],
+            "episode_name": episode_name,
+            "display_title": episode_name,
+            "is_owned": r["owner_slug"] is not None,
+            "owner_slug": r["owner_slug"],
+            "stream_count": r["stream_count"],
+            "can_add": (r["can_add_count"] or 0) > 0,
+            "download_completed": r["download_status"] == "completed",
+        })
+
+    return JSONResponse({"title": title, "season": season, "episodes": episodes})
+
+
+@router.get("/tv_vod/{title}/years", response_class=JSONResponse)
+async def list_tv_vod_years(
+    title: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Return years for a tv_vod show title with per-year ownership and follow info."""
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                substr(e.air_date, 1, 4) AS year,
+                COUNT(e.entry_id) AS episode_count,
+                {_COVER_ART_GROUP_SUBQUERY} AS cover_art,
+                SUM(CASE WHEN s.strm_path IS NOT NULL THEN 1 ELSE 0 END) AS owned_count,
+                SUM(CASE WHEN p.strm_mode = 'import_selected' AND p.is_active = 1
+                              AND s.exclude = 0 AND s.imported = 0
+                              AND (s.include_only_active = 0 OR s.include_only = 1)
+                         THEN 1 ELSE 0 END) AS can_add_count,
+                (SELECT COUNT(*) FROM downloads _dl
+                 JOIN entries _e ON _e.entry_id = _dl.entry_id
+                 WHERE _e.type = 'tv_vod' AND lower(_e.cleaned_title) = lower(e.cleaned_title)
+                   AND substr(_e.air_date, 1, 4) = substr(e.air_date, 1, 4)
+                   AND _dl.status = 'completed') AS download_completed_count
+            FROM entries e
+            LEFT JOIN streams s ON s.entry_id = e.entry_id
+            LEFT JOIN providers p ON p.slug = s.provider
+            WHERE e.type = 'tv_vod' AND lower(e.cleaned_title) = lower(?)
+            GROUP BY substr(e.air_date, 1, 4)
+            ORDER BY substr(e.air_date, 1, 4) DESC
+            """,
+            (title,),
+        ).fetchall()
+
+        follows = conn.execute(
+            """
+            SELECT f.season FROM follows f
+            WHERE lower(f.entry_title) = lower(?) AND f.entry_type = 'tv_vod'
+            """,
+            (title,),
+        ).fetchall()
+
+    followed_all = any(f["season"] is None for f in follows)
+    followed_years = {str(f["season"]) for f in follows if f["season"] is not None}
+
+    years = [{
+        "year": r["year"] or "Unknown",
+        "episode_count": r["episode_count"],
+        "cover_art": r["cover_art"],
+        "owned_count": r["owned_count"] or 0,
+        "is_owned": (r["owned_count"] or 0) > 0,
+        "can_add": (r["can_add_count"] or 0) > 0,
+        "download_completed": (r["download_completed_count"] or 0) > 0,
+        "is_following": followed_all or (r["year"] in followed_years),
+    } for r in rows]
+
+    return JSONResponse({"title": title, "years": years, "is_following_all": followed_all})
+
+
+@router.get("/tv_vod/{title}/years/{year}/episodes", response_class=JSONResponse)
+async def list_tv_vod_episodes(
+    title: str,
+    year: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Return individual episodes for a tv_vod show title + year."""
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                e.entry_id, e.air_date,
+                {_COVER_ART_SUBQUERY} AS cover_art,
+                (SELECT s2.provider FROM streams s2 WHERE s2.entry_id = e.entry_id AND s2.strm_path IS NOT NULL LIMIT 1) AS owner_slug,
+                (SELECT COUNT(*) FROM streams s2 WHERE s2.entry_id = e.entry_id) AS stream_count,
+                (SELECT COUNT(*) FROM streams s2
+                 JOIN providers p2 ON p2.slug = s2.provider
+                 WHERE s2.entry_id = e.entry_id
+                   AND p2.strm_mode = 'import_selected' AND p2.is_active = 1
+                   AND s2.exclude = 0 AND s2.imported = 0
+                   AND (s2.include_only_active = 0 OR s2.include_only = 1)
+                ) AS can_add_count,
+                (SELECT _dl.status FROM downloads _dl WHERE _dl.entry_id = e.entry_id) AS download_status
+            FROM entries e
+            WHERE e.type = 'tv_vod'
+              AND lower(e.cleaned_title) = lower(?)
+              AND substr(e.air_date, 1, 4) = ?
+            ORDER BY e.air_date DESC
+            """,
+            (title, year),
+        ).fetchall()
+
+    episodes = [{
+        "entry_id": r["entry_id"],
+        "air_date": r["air_date"],
+        "cover_art": r["cover_art"],
+        "is_owned": r["owner_slug"] is not None,
+        "owner_slug": r["owner_slug"],
+        "stream_count": r["stream_count"],
+        "can_add": (r["can_add_count"] or 0) > 0,
+        "download_completed": r["download_status"] == "completed",
+    } for r in rows]
+
+    return JSONResponse({"title": title, "year": year, "episodes": episodes})
+
+
+@router.post("/tv_vod/{title}/years/{year}/add")
+async def add_tv_vod_year(
+    title: str,
+    year: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    from app.tasks.strm import generate_strm
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='tv_vod' AND lower(cleaned_title)=lower(?) AND substr(air_date,1,4)=?",
+                (title, year),
+            ).fetchall()
+        ]
+        marked = 0
+        for eid in entry_ids:
+            stream = conn.execute(
+                """
+                SELECT s.stream_id FROM streams s
+                JOIN providers p ON p.slug = s.provider
+                WHERE s.entry_id = ?
+                  AND p.strm_mode = 'import_selected' AND p.is_active = 1
+                  AND s.exclude = 0 AND s.imported = 0
+                ORDER BY p.priority, p.slug LIMIT 1
+                """,
+                (eid,),
+            ).fetchone()
+            if stream:
+                conn.execute("UPDATE streams SET imported = 1 WHERE stream_id = ?", (stream["stream_id"],))
+                marked += 1
+        logger.info("[LIBRARY] Add tv_vod title=%r year=%s episodes=%d by=%s", title, year, marked, current_user.username)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after tv_vod year Add failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "marked": marked})
+
+
+@router.post("/tv_vod/{title}/years/{year}/remove")
+async def remove_tv_vod_year(
+    title: str,
+    year: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    from app.tasks.strm import generate_strm
+    from app.tasks.downloads import cancel_download
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='tv_vod' AND lower(cleaned_title)=lower(?) AND substr(air_date,1,4)=?",
+                (title, year),
+            ).fetchall()
+        ]
+        cleared = 0
+        for eid in entry_ids:
+            owned = conn.execute(
+                """
+                SELECT s.stream_id, s.strm_path FROM streams s
+                JOIN providers p ON p.slug = s.provider
+                WHERE s.entry_id = ? AND p.strm_mode = 'import_selected' AND s.imported = 1
+                """,
+                (eid,),
+            ).fetchall()
+            for row in owned:
+                if row["strm_path"]:
+                    _delete_strm_file(row["strm_path"])
+                conn.execute(
+                    "UPDATE streams SET imported = 0, strm_path = NULL, last_written_url = NULL WHERE stream_id = ?",
+                    (row["stream_id"],),
+                )
+                cleared += 1
+        logger.info("[LIBRARY] Remove tv_vod title=%r year=%s cleared=%d by=%s", title, year, cleared, current_user.username)
+    for eid in entry_ids:
+        cancel_download(eid, delete_file=True)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after tv_vod year Remove failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "cleared": cleared})
+
+
+@router.post("/tv_vod/{title}/add")
+async def add_tv_vod_all(
+    title: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    from app.tasks.strm import generate_strm
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='tv_vod' AND lower(cleaned_title)=lower(?)",
+                (title,),
+            ).fetchall()
+        ]
+        marked = 0
+        for eid in entry_ids:
+            stream = conn.execute(
+                """
+                SELECT s.stream_id FROM streams s
+                JOIN providers p ON p.slug = s.provider
+                WHERE s.entry_id = ?
+                  AND p.strm_mode = 'import_selected' AND p.is_active = 1
+                  AND s.exclude = 0 AND s.imported = 0
+                ORDER BY p.priority, p.slug LIMIT 1
+                """,
+                (eid,),
+            ).fetchone()
+            if stream:
+                conn.execute("UPDATE streams SET imported = 1 WHERE stream_id = ?", (stream["stream_id"],))
+                marked += 1
+        logger.info("[LIBRARY] Add tv_vod all title=%r episodes=%d by=%s", title, marked, current_user.username)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after tv_vod Add All failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "marked": marked})
+
+
+@router.post("/tv_vod/{title}/remove")
+async def remove_tv_vod_all(
+    title: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    from app.tasks.strm import generate_strm
+    from app.tasks.downloads import cancel_download
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='tv_vod' AND lower(cleaned_title)=lower(?)",
+                (title,),
+            ).fetchall()
+        ]
+        cleared = 0
+        for eid in entry_ids:
+            owned = conn.execute(
+                """
+                SELECT s.stream_id, s.strm_path FROM streams s
+                JOIN providers p ON p.slug = s.provider
+                WHERE s.entry_id = ? AND p.strm_mode = 'import_selected' AND s.imported = 1
+                """,
+                (eid,),
+            ).fetchall()
+            for row in owned:
+                if row["strm_path"]:
+                    _delete_strm_file(row["strm_path"])
+                conn.execute(
+                    "UPDATE streams SET imported = 0, strm_path = NULL, last_written_url = NULL WHERE stream_id = ?",
+                    (row["stream_id"],),
+                )
+                cleared += 1
+        logger.info("[LIBRARY] Remove tv_vod all title=%r cleared=%d by=%s", title, cleared, current_user.username)
+    for eid in entry_ids:
+        cancel_download(eid, delete_file=True)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after tv_vod Remove All failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "cleared": cleared})
+
+
+# ---------------------------------------------------------------------------
+# Add / Remove — episode level (by entry_id)
+# ---------------------------------------------------------------------------
+
+def _entry_type(conn, entry_id: str) -> str | None:
+    row = conn.execute("SELECT type FROM entries WHERE entry_id = ?", (entry_id,)).fetchone()
+    return row["type"] if row else None
+
+
+def _maybe_generate_live_m3u(entry_type: str | None) -> None:
+    if entry_type == "live":
+        from app.tasks.live_m3u import generate_live_m3u
+        try:
+            generate_live_m3u()
+        except Exception as exc:
+            logger.error("[LIBRARY] generate_live_m3u failed: %s", exc, exc_info=True)
+
+
+@router.post("/entries/{entry_id}/add")
+async def add_entry(
+    entry_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    from app.tasks.strm import generate_strm
+    with get_db() as conn:
+        etype = _entry_type(conn, entry_id)
+        stream = conn.execute(
+            """
+            SELECT s.stream_id FROM streams s
+            JOIN providers p ON p.slug = s.provider
+            WHERE s.entry_id = ?
+              AND p.strm_mode = 'import_selected' AND p.is_active = 1
+              AND s.exclude = 0 AND s.imported = 0
+            ORDER BY p.priority, p.slug
+            LIMIT 1
+            """,
+            (entry_id,),
+        ).fetchone()
+        if stream:
+            conn.execute("UPDATE streams SET imported = 1 WHERE stream_id = ?", (stream["stream_id"],))
+            logger.info("[LIBRARY] Add entry=%s stream=%s by=%s", entry_id[:12], stream["stream_id"], current_user.username)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after Add failed: %s", exc, exc_info=True)
+    _maybe_generate_live_m3u(etype)
+    return JSONResponse({"ok": True})
+
+
+@router.post("/entries/{entry_id}/remove")
+async def remove_entry(
+    entry_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    from app.tasks.strm import generate_strm
+    from app.tasks.downloads import cancel_download
+    with get_db() as conn:
+        etype = _entry_type(conn, entry_id)
+        owned = conn.execute(
+            """
+            SELECT s.stream_id, s.strm_path FROM streams s
+            JOIN providers p ON p.slug = s.provider
+            WHERE s.entry_id = ? AND p.strm_mode = 'import_selected' AND s.imported = 1
+            """,
+            (entry_id,),
+        ).fetchall()
+        for row in owned:
+            if row["strm_path"]:
+                _delete_strm_file(row["strm_path"])
+            conn.execute(
+                "UPDATE streams SET imported = 0, strm_path = NULL, last_written_url = NULL WHERE stream_id = ?",
+                (row["stream_id"],),
+            )
+        logger.info("[LIBRARY] Remove entry=%s cleared=%d by=%s", entry_id[:12], len(owned), current_user.username)
+    cancel_download(entry_id, delete_file=True)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after Remove failed: %s", exc, exc_info=True)
+    _maybe_generate_live_m3u(etype)
+    return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Add / Remove — season level (all episodes in a season)
+# ---------------------------------------------------------------------------
+
+@router.post("/series/{title}/seasons/{season}/add")
+async def add_season(
+    title: str,
+    season: int,
+    current_user: TokenData = Depends(get_current_user),
+):
+    from app.tasks.strm import generate_strm
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='series' AND lower(cleaned_title)=lower(?) AND season=?",
+                (title, season),
+            ).fetchall()
+        ]
+        marked = 0
+        for eid in entry_ids:
+            stream = conn.execute(
+                """
+                SELECT s.stream_id FROM streams s
+                JOIN providers p ON p.slug = s.provider
+                WHERE s.entry_id = ?
+                  AND p.strm_mode = 'import_selected' AND p.is_active = 1
+                  AND s.exclude = 0 AND s.imported = 0
+                ORDER BY p.priority, p.slug LIMIT 1
+                """,
+                (eid,),
+            ).fetchone()
+            if stream:
+                conn.execute("UPDATE streams SET imported = 1 WHERE stream_id = ?", (stream["stream_id"],))
+                marked += 1
+        logger.info("[LIBRARY] Add season title=%r S%02d episodes=%d by=%s", title, season, marked, current_user.username)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after season Add failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "marked": marked})
+
+
+@router.post("/series/{title}/seasons/{season}/remove")
+async def remove_season(
+    title: str,
+    season: int,
+    current_user: TokenData = Depends(get_current_user),
+):
+    from app.tasks.strm import generate_strm
+    from app.tasks.downloads import cancel_download
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='series' AND lower(cleaned_title)=lower(?) AND season=?",
+                (title, season),
+            ).fetchall()
+        ]
+        cleared = 0
+        for eid in entry_ids:
+            owned = conn.execute(
+                """
+                SELECT s.stream_id, s.strm_path FROM streams s
+                JOIN providers p ON p.slug = s.provider
+                WHERE s.entry_id = ? AND p.strm_mode = 'import_selected' AND s.imported = 1
+                """,
+                (eid,),
+            ).fetchall()
+            for row in owned:
+                if row["strm_path"]:
+                    _delete_strm_file(row["strm_path"])
+                conn.execute(
+                    "UPDATE streams SET imported = 0, strm_path = NULL, last_written_url = NULL WHERE stream_id = ?",
+                    (row["stream_id"],),
+                )
+                cleared += 1
+        logger.info("[LIBRARY] Remove season title=%r S%02d cleared=%d by=%s", title, season, cleared, current_user.username)
+    for eid in entry_ids:
+        cancel_download(eid, delete_file=True)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after season Remove failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "cleared": cleared})
+
+
+# ---------------------------------------------------------------------------
+# Add / Remove — series title level (all episodes across all seasons)
+# ---------------------------------------------------------------------------
+
+@router.post("/series/{title}/add")
+async def add_series(
+    title: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    from app.tasks.strm import generate_strm
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='series' AND lower(cleaned_title)=lower(?)",
+                (title,),
+            ).fetchall()
+        ]
+        marked = 0
+        for eid in entry_ids:
+            stream = conn.execute(
+                """
+                SELECT s.stream_id FROM streams s
+                JOIN providers p ON p.slug = s.provider
+                WHERE s.entry_id = ?
+                  AND p.strm_mode = 'import_selected' AND p.is_active = 1
+                  AND s.exclude = 0 AND s.imported = 0
+                ORDER BY p.priority, p.slug LIMIT 1
+                """,
+                (eid,),
+            ).fetchone()
+            if stream:
+                conn.execute("UPDATE streams SET imported = 1 WHERE stream_id = ?", (stream["stream_id"],))
+                marked += 1
+        logger.info("[LIBRARY] Add series title=%r episodes=%d by=%s", title, marked, current_user.username)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after series Add failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "marked": marked})
+
+
+@router.post("/series/{title}/remove")
+async def remove_series(
+    title: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    from app.tasks.strm import generate_strm
+    from app.tasks.downloads import cancel_download
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='series' AND lower(cleaned_title)=lower(?)",
+                (title,),
+            ).fetchall()
+        ]
+        cleared = 0
+        for eid in entry_ids:
+            owned = conn.execute(
+                """
+                SELECT s.stream_id, s.strm_path FROM streams s
+                JOIN providers p ON p.slug = s.provider
+                WHERE s.entry_id = ? AND p.strm_mode = 'import_selected' AND s.imported = 1
+                """,
+                (eid,),
+            ).fetchall()
+            for row in owned:
+                if row["strm_path"]:
+                    _delete_strm_file(row["strm_path"])
+                conn.execute(
+                    "UPDATE streams SET imported = 0, strm_path = NULL, last_written_url = NULL WHERE stream_id = ?",
+                    (row["stream_id"],),
+                )
+                cleared += 1
+        logger.info("[LIBRARY] Remove series title=%r cleared=%d by=%s", title, cleared, current_user.username)
+    for eid in entry_ids:
+        cancel_download(eid, delete_file=True)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after series Remove failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "cleared": cleared})
+
+
+# ---------------------------------------------------------------------------
+# Internal helper: mark existing episodes as imported
+# ---------------------------------------------------------------------------
+
+def _import_entries_for_title(conn, entry_type: str, title: str, season) -> int:
+    """Mark all existing unimported streams for a title (optionally a specific season) as imported=1.
+    Returns count of streams marked."""
+    if entry_type == "series":
+        if season is not None:
+            rows = conn.execute(
+                "SELECT entry_id FROM entries WHERE type='series' AND lower(cleaned_title)=lower(?) AND season=?",
+                (title, season),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT entry_id FROM entries WHERE type='series' AND lower(cleaned_title)=lower(?)",
+                (title,),
+            ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT entry_id FROM entries WHERE type=? AND lower(cleaned_title)=lower(?)",
+            (entry_type, title),
+        ).fetchall()
+
+    marked = 0
+    for r in rows:
+        stream = conn.execute(
+            """
+            SELECT s.stream_id FROM streams s
+            JOIN providers p ON p.slug = s.provider
+            WHERE s.entry_id = ?
+              AND p.strm_mode = 'import_selected' AND p.is_active = 1
+              AND s.exclude = 0 AND s.imported = 0
+            ORDER BY p.priority, p.slug LIMIT 1
+            """,
+            (r["entry_id"],),
+        ).fetchone()
+        if stream:
+            conn.execute("UPDATE streams SET imported = 1 WHERE stream_id = ?", (stream["stream_id"],))
+            marked += 1
+    return marked
+
+
+# ---------------------------------------------------------------------------
+# Follow rules — CRUD
+# ---------------------------------------------------------------------------
+
+@router.get("/follows", response_class=JSONResponse)
+async def list_follows(current_user: TokenData = Depends(get_current_user)):
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT f.id, f.entry_type, f.entry_title, f.season,
+                   p.name AS provider_name, p.slug AS provider_slug
+            FROM follows f
+            JOIN providers p ON p.id = f.provider_id
+            ORDER BY p.name, f.entry_type, f.entry_title
+            """
+        ).fetchall()
+    return JSONResponse([dict(r) for r in rows])
+
+
+@router.post("/follows", response_class=JSONResponse)
+async def add_follow(
+    entry_type: str = Form(...),
+    entry_title: str = Form(...),
+    mode: str = Form("strm"),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Create a follow rule for an entire series and immediately import or queue all existing episodes."""
+    from app.tasks.strm import generate_strm
+    if entry_type not in ("movie", "series", "tv_vod"):
+        return JSONResponse({"ok": False, "error": "Invalid entry_type"}, status_code=400)
+    if mode not in ("strm", "download"):
+        mode = "strm"
+
+    title = entry_title.strip()
+    with get_db() as conn:
+        providers = conn.execute(
+            "SELECT id FROM providers WHERE strm_mode = 'import_selected' AND is_active = 1"
+        ).fetchall()
+
+        if not providers:
+            return JSONResponse({"ok": False, "error": "No active import_selected providers"}, status_code=400)
+
+        inserted = 0
+        for p in providers:
+            exists = conn.execute(
+                "SELECT 1 FROM follows WHERE provider_id = ? AND entry_type = ? AND lower(entry_title) = lower(?) AND season IS NULL",
+                (p["id"], entry_type, title),
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    "INSERT INTO follows (provider_id, entry_type, entry_title, season, mode) VALUES (?, ?, ?, NULL, ?)",
+                    (p["id"], entry_type, title, mode),
+                )
+                inserted += 1
+
+        if mode == "download":
+            from app.tasks.downloads import queue_download
+            entry_ids = [
+                r["entry_id"] for r in conn.execute(
+                    "SELECT entry_id FROM entries WHERE type=? AND lower(cleaned_title)=lower(?)",
+                    (entry_type, title),
+                ).fetchall()
+            ]
+            marked = 0
+            for eid in entry_ids:
+                if queue_download(eid, conn=conn):
+                    marked += 1
+        else:
+            # Immediately import all existing matching episodes
+            marked = _import_entries_for_title(conn, entry_type, title, season=None)
+
+    logger.info(
+        "[LIBRARY] Follow added type=%s title=%r mode=%s providers=%d marked=%d by=%s",
+        entry_type, title, mode, inserted, marked, current_user.username,
+    )
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after follow failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "inserted": inserted, "marked": marked})
+
+
+@router.post("/follows/{follow_id}/delete", response_class=JSONResponse)
+async def delete_follow(
+    follow_id: int,
+    current_user: TokenData = Depends(get_current_user),
+):
+    with get_db() as conn:
+        conn.execute("DELETE FROM follows WHERE id = ?", (follow_id,))
+    logger.info("[LIBRARY] Follow deleted id=%d by=%s", follow_id, current_user.username)
+    return JSONResponse({"ok": True})
+
+
+@router.post("/series/{title}/seasons/{season}/follow", response_class=JSONResponse)
+async def follow_season(
+    title: str,
+    season: int,
+    mode: str = "strm",
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Create a season-specific follow rule and immediately import or queue all existing episodes."""
+    from app.tasks.strm import generate_strm
+    if mode not in ("strm", "download"):
+        mode = "strm"
+    with get_db() as conn:
+        providers = conn.execute(
+            "SELECT id FROM providers WHERE strm_mode = 'import_selected' AND is_active = 1"
+        ).fetchall()
+
+        if not providers:
+            return JSONResponse({"ok": False, "error": "No active import_selected providers"}, status_code=400)
+
+        inserted = 0
+        for p in providers:
+            exists = conn.execute(
+                "SELECT 1 FROM follows WHERE provider_id = ? AND entry_type = 'series' AND lower(entry_title) = lower(?) AND season = ?",
+                (p["id"], title, season),
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    "INSERT INTO follows (provider_id, entry_type, entry_title, season, mode) VALUES (?, 'series', ?, ?, ?)",
+                    (p["id"], title, season, mode),
+                )
+                inserted += 1
+
+        if mode == "download":
+            from app.tasks.downloads import queue_download
+            entry_ids = [
+                r["entry_id"] for r in conn.execute(
+                    "SELECT entry_id FROM entries WHERE type='series' AND lower(cleaned_title)=lower(?) AND season=?",
+                    (title, season),
+                ).fetchall()
+            ]
+            marked = 0
+            for eid in entry_ids:
+                if queue_download(eid, conn=conn):
+                    marked += 1
+        else:
+            marked = _import_entries_for_title(conn, "series", title, season=season)
+
+    logger.info("[LIBRARY] Follow season title=%r S%02d mode=%s inserted=%d marked=%d by=%s", title, season, mode, inserted, marked, current_user.username)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after season follow failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "inserted": inserted, "marked": marked})
+
+
+@router.post("/series/{title}/seasons/{season}/unfollow", response_class=JSONResponse)
+async def unfollow_season(
+    title: str,
+    season: int,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Remove season-specific follow rules for a series title + season."""
+    with get_db() as conn:
+        result = conn.execute(
+            "DELETE FROM follows WHERE lower(entry_title) = lower(?) AND entry_type = 'series' AND season = ?",
+            (title, season),
+        )
+        deleted = result.rowcount
+    logger.info("[LIBRARY] Unfollow season title=%r S%02d deleted=%d by=%s", title, season, deleted, current_user.username)
+    return JSONResponse({"ok": True, "deleted": deleted})
+
+
+@router.post("/series/{title}/unfollow", response_class=JSONResponse)
+async def unfollow_series(
+    title: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Remove all follow rules for a series title."""
+    with get_db() as conn:
+        result = conn.execute(
+            "DELETE FROM follows WHERE lower(entry_title) = lower(?) AND entry_type = 'series'",
+            (title,),
+        )
+        deleted = result.rowcount
+    logger.info("[LIBRARY] Unfollow series title=%r deleted=%d by=%s", title, deleted, current_user.username)
+    return JSONResponse({"ok": True, "deleted": deleted})
+
+
+# ---------------------------------------------------------------------------
+# TV VOD follow / unfollow (whole show and per-year)
+# ---------------------------------------------------------------------------
+
+@router.post("/tv_vod/{title}/follow", response_class=JSONResponse)
+async def follow_tv_vod(
+    title: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Create a whole-show follow rule for a tv_vod title and import all existing episodes."""
+    from app.tasks.strm import generate_strm
+    with get_db() as conn:
+        providers = conn.execute(
+            "SELECT id FROM providers WHERE strm_mode = 'import_selected' AND is_active = 1"
+        ).fetchall()
+        if not providers:
+            return JSONResponse({"ok": False, "error": "No active import_selected providers"}, status_code=400)
+
+        inserted = 0
+        for p in providers:
+            exists = conn.execute(
+                "SELECT 1 FROM follows WHERE provider_id = ? AND entry_type = 'tv_vod' AND lower(entry_title) = lower(?) AND season IS NULL",
+                (p["id"], title),
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    "INSERT INTO follows (provider_id, entry_type, entry_title, season) VALUES (?, 'tv_vod', ?, NULL)",
+                    (p["id"], title),
+                )
+                inserted += 1
+
+        marked = _import_entries_for_title(conn, "tv_vod", title, season=None)
+
+    logger.info("[LIBRARY] Follow tv_vod title=%r providers=%d marked=%d by=%s", title, inserted, marked, current_user.username)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after tv_vod follow failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "inserted": inserted, "marked": marked})
+
+
+@router.post("/tv_vod/{title}/unfollow", response_class=JSONResponse)
+async def unfollow_tv_vod(
+    title: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Remove all follow rules for a tv_vod title."""
+    with get_db() as conn:
+        result = conn.execute(
+            "DELETE FROM follows WHERE lower(entry_title) = lower(?) AND entry_type = 'tv_vod'",
+            (title,),
+        )
+        deleted = result.rowcount
+    logger.info("[LIBRARY] Unfollow tv_vod title=%r deleted=%d by=%s", title, deleted, current_user.username)
+    return JSONResponse({"ok": True, "deleted": deleted})
+
+
+@router.post("/tv_vod/{title}/years/{year}/follow", response_class=JSONResponse)
+async def follow_tv_vod_year(
+    title: str,
+    year: str,
+    mode: str = "strm",
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Create a year-specific follow rule for a tv_vod show and import or queue all existing episodes in that year."""
+    from app.tasks.strm import generate_strm
+    if mode not in ("strm", "download"):
+        mode = "strm"
+    # Store year as integer in the season column to reuse the schema
+    try:
+        year_int = int(year)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid year"}, status_code=400)
+
+    with get_db() as conn:
+        providers = conn.execute(
+            "SELECT id FROM providers WHERE strm_mode = 'import_selected' AND is_active = 1"
+        ).fetchall()
+        if not providers:
+            return JSONResponse({"ok": False, "error": "No active import_selected providers"}, status_code=400)
+
+        inserted = 0
+        for p in providers:
+            exists = conn.execute(
+                "SELECT 1 FROM follows WHERE provider_id = ? AND entry_type = 'tv_vod' AND lower(entry_title) = lower(?) AND season = ?",
+                (p["id"], title, year_int),
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    "INSERT INTO follows (provider_id, entry_type, entry_title, season, mode) VALUES (?, 'tv_vod', ?, ?, ?)",
+                    (p["id"], title, year_int, mode),
+                )
+                inserted += 1
+
+        # Import or queue all existing episodes in this year
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='tv_vod' AND lower(cleaned_title)=lower(?) AND substr(air_date,1,4)=?",
+                (title, year),
+            ).fetchall()
+        ]
+        if mode == "download":
+            from app.tasks.downloads import queue_download
+            marked = 0
+            for eid in entry_ids:
+                if queue_download(eid, conn=conn):
+                    marked += 1
+        else:
+            marked = 0
+            for eid in entry_ids:
+                stream = conn.execute(
+                    """
+                    SELECT s.stream_id FROM streams s
+                    JOIN providers p ON p.slug = s.provider
+                    WHERE s.entry_id = ?
+                      AND p.strm_mode = 'import_selected' AND p.is_active = 1
+                      AND s.exclude = 0 AND s.imported = 0
+                    ORDER BY p.priority, p.slug LIMIT 1
+                    """,
+                    (eid,),
+                ).fetchone()
+                if stream:
+                    conn.execute("UPDATE streams SET imported = 1 WHERE stream_id = ?", (stream["stream_id"],))
+                    marked += 1
+
+    logger.info("[LIBRARY] Follow tv_vod year title=%r year=%s mode=%s inserted=%d marked=%d by=%s", title, year, mode, inserted, marked, current_user.username)
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[LIBRARY] generate_strm after tv_vod year follow failed: %s", exc, exc_info=True)
+    return JSONResponse({"ok": True, "inserted": inserted, "marked": marked})
+
+
+@router.post("/tv_vod/{title}/years/{year}/unfollow", response_class=JSONResponse)
+async def unfollow_tv_vod_year(
+    title: str,
+    year: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Remove year-specific follow rules for a tv_vod title."""
+    try:
+        year_int = int(year)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid year"}, status_code=400)
+
+    with get_db() as conn:
+        result = conn.execute(
+            "DELETE FROM follows WHERE lower(entry_title) = lower(?) AND entry_type = 'tv_vod' AND season = ?",
+            (title, year_int),
+        )
+        deleted = result.rowcount
+    logger.info("[LIBRARY] Unfollow tv_vod year title=%r year=%s deleted=%d by=%s", title, year, deleted, current_user.username)
+    return JSONResponse({"ok": True, "deleted": deleted})
+
+
+# ---------------------------------------------------------------------------
+# Downloads — one-off download, queue list, cancel/delete
+# ---------------------------------------------------------------------------
+
+@router.post("/entries/{entry_id}/download", response_class=JSONResponse)
+async def download_entry(
+    entry_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Queue a single entry for download."""
+    with get_db() as conn:
+        entry = conn.execute(
+            "SELECT type FROM entries WHERE entry_id=?", (entry_id,)
+        ).fetchone()
+    if not entry:
+        return JSONResponse({"error": "Entry not found"}, status_code=404)
+    from app.tasks.downloads import queue_download
+    queued = queue_download(entry_id)
+    logger.info("[LIBRARY] Download queued entry=%s by=%s", entry_id[:12], current_user.username)
+    return JSONResponse({"ok": True, "queued": queued})
+
+
+@router.post(
+    "/series/{title}/seasons/{season}/episodes/{episode}/download",
+    response_class=JSONResponse,
+)
+async def download_series_episode(
+    title: str,
+    season: int,
+    episode: int,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Resolve and queue a series episode by its visible content identity."""
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT e.entry_id
+            FROM entries e
+            WHERE e.type='series'
+              AND lower(e.cleaned_title)=lower(?)
+              AND e.season=? AND e.episode=?
+              AND EXISTS (
+                  SELECT 1 FROM streams s
+                  JOIN providers p ON p.slug=s.provider
+                  WHERE s.entry_id=e.entry_id
+                    AND p.is_active=1
+                    AND s.exclude=0
+                    AND (s.include_only_active=0 OR s.include_only=1)
+              )
+            LIMIT 1
+            """,
+            (title, season, episode),
+        ).fetchone()
+    if not row:
+        return JSONResponse({"error": "Episode not found"}, status_code=404)
+
+    from app.tasks.downloads import queue_download
+    entry_id = row["entry_id"]
+    queued = queue_download(entry_id)
+    logger.info(
+        "[LIBRARY] Download queued series=%r S%02dE%02d entry=%s by=%s",
+        title,
+        season,
+        episode,
+        entry_id[:12],
+        current_user.username,
+    )
+    return JSONResponse({"ok": True, "queued": queued, "entry_id": entry_id})
+
+
+@router.post("/entries/{entry_id}/cancel-download", response_class=JSONResponse)
+async def cancel_entry_download(
+    entry_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Cancel a download for an entry, optionally deleting the local file."""
+    from app.tasks.downloads import cancel_download
+    deleted = cancel_download(entry_id, delete_file=True)
+    if not deleted:
+        return JSONResponse({"ok": True, "already_removed": True})
+    logger.info("[LIBRARY] Download cancelled entry=%s by=%s", entry_id[:12], current_user.username)
+    background_tasks.add_task(_generate_strm_after_download_change, "cancel")
+    return JSONResponse({"ok": True})
+
+
+def _generate_strm_after_download_change(action: str) -> None:
+    try:
+        from app.tasks.strm import generate_strm
+        generate_strm()
+    except Exception as exc:
+        logger.error(
+            "[LIBRARY] generate_strm after download %s failed: %s",
+            action,
+            exc,
+            exc_info=True,
+        )
+
+
+def _queue_downloads_for_entries(conn, entry_ids: list[str]) -> int:
+    """Queue downloads for multiple entry_ids. Returns count of newly queued."""
+    from app.tasks.downloads import queue_download
+    queued = 0
+    for eid in entry_ids:
+        if queue_download(eid, conn=conn):
+            queued += 1
+    return queued
+
+
+@router.post("/series/{title}/download", response_class=JSONResponse)
+async def download_series(
+    title: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Queue downloads for all episodes of a series."""
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='series' AND lower(cleaned_title)=lower(?)",
+                (title,),
+            ).fetchall()
+        ]
+    queued = _queue_downloads_for_entries(None, entry_ids)
+    logger.info("[LIBRARY] Download series title=%r queued=%d by=%s", title, queued, current_user.username)
+    return JSONResponse({"ok": True, "queued": queued})
+
+
+@router.post("/series/{title}/seasons/{season}/download", response_class=JSONResponse)
+async def download_season(
+    title: str,
+    season: int,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Queue downloads for all episodes in a specific season."""
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='series' AND lower(cleaned_title)=lower(?) AND season=?",
+                (title, season),
+            ).fetchall()
+        ]
+    queued = _queue_downloads_for_entries(None, entry_ids)
+    logger.info("[LIBRARY] Download season title=%r S%02d queued=%d by=%s", title, season, queued, current_user.username)
+    return JSONResponse({"ok": True, "queued": queued})
+
+
+@router.post("/tv_vod/{title}/download", response_class=JSONResponse)
+async def download_tv_vod(
+    title: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Queue downloads for all episodes of a tv_vod show."""
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='tv_vod' AND lower(cleaned_title)=lower(?)",
+                (title,),
+            ).fetchall()
+        ]
+    queued = _queue_downloads_for_entries(None, entry_ids)
+    logger.info("[LIBRARY] Download tv_vod title=%r queued=%d by=%s", title, queued, current_user.username)
+    return JSONResponse({"ok": True, "queued": queued})
+
+
+@router.post("/tv_vod/{title}/years/{year}/download", response_class=JSONResponse)
+async def download_tv_vod_year(
+    title: str,
+    year: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Queue downloads for all episodes of a tv_vod show in a specific year."""
+    with get_db() as conn:
+        entry_ids = [
+            r["entry_id"] for r in conn.execute(
+                "SELECT entry_id FROM entries WHERE type='tv_vod' AND lower(cleaned_title)=lower(?) AND substr(air_date,1,4)=?",
+                (title, year),
+            ).fetchall()
+        ]
+    queued = _queue_downloads_for_entries(None, entry_ids)
+    logger.info("[LIBRARY] Download tv_vod year title=%r year=%s queued=%d by=%s", title, year, queued, current_user.username)
+    return JSONResponse({"ok": True, "queued": queued})
+
+
+@router.get("/downloads", response_class=HTMLResponse)
+async def downloads_page(
+    request: Request,
+    current_user: TokenData = Depends(get_current_user),
+):
+    return templates.TemplateResponse(
+        "library/downloads.html",
+        {"request": request, "current_user": current_user},
+    )
+
+
+@router.get("/downloads/list", response_class=JSONResponse)
+async def list_downloads(current_user: TokenData = Depends(get_current_user)):
+    """Return all download rows with entry metadata for the downloads page."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT d.entry_id, d.status, d.provider, d.container,
+                     d.file_size, d.expected_size, d.downloaded_bytes,
+                     d.fail_reason, d.retry_count,
+                   d.queued_at, d.completed_at, d.failed_at,
+                   d.local_path,
+                   e.type, e.cleaned_title, e.year, e.season, e.episode, e.air_date
+            FROM downloads d
+            LEFT JOIN entries e ON e.entry_id = d.entry_id
+            ORDER BY
+                CASE d.status
+                    WHEN 'pending' THEN 0
+                    WHEN 'probing' THEN 1
+                    WHEN 'downloading' THEN 2
+                    WHEN 'failed' THEN 3
+                    WHEN 'cancelled' THEN 4
+                    WHEN 'completed' THEN 5
+                END,
+                d.queued_at DESC
+            """,
+        ).fetchall()
+
+    items = []
+    for r in rows:
+        title = r["cleaned_title"] or r["entry_id"]
+        if r["season"] and r["episode"]:
+            title = f"{title} S{r['season']:02d}E{r['episode']:02d}"
+        elif r["air_date"]:
+            title = f"{title} ({r['air_date'][:10]})"
+        items.append({
+            "entry_id": r["entry_id"],
+            "status": r["status"],
+            "provider": r["provider"],
+            "container": r["container"],
+            "file_size": r["file_size"],
+            "expected_size": r["expected_size"],
+            "downloaded_bytes": r["downloaded_bytes"],
+            "fail_reason": r["fail_reason"],
+            "retry_count": r["retry_count"],
+            "queued_at": (r["queued_at"] or "")[:19].replace("T", " "),
+            "completed_at": (r["completed_at"] or "")[:19].replace("T", " "),
+            "failed_at": (r["failed_at"] or "")[:19].replace("T", " "),
+            "title": title,
+            "type": r["type"],
+            "is_completed": r["status"] == "completed",
+            "is_active": r["status"] in ("pending", "probing", "downloading"),
+            "is_failed": r["status"] == "failed",
+        })
+
+    return JSONResponse({"downloads": items})
+
+
+@router.post("/downloads/{entry_id}/retry", response_class=JSONResponse)
+async def retry_download(
+    entry_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Re-queue a failed or cancelled download."""
+    from app.tasks.downloads import queue_download
+    queued = queue_download(entry_id)
+    logger.info("[LIBRARY] Download retried entry=%s by=%s", entry_id[:12], current_user.username)
+    return JSONResponse({"ok": True, "queued": queued})
+
+
+@router.post("/downloads/{entry_id}/delete", response_class=JSONResponse)
+async def delete_download(
+    entry_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Delete a completed download and its local file."""
+    from app.tasks.downloads import remove_download
+    result = remove_download(entry_id)
+    logger.info(
+        "[LIBRARY] Download removed entry=%s file_present=%s by=%s",
+        entry_id[:12],
+        result["file_present"],
+        current_user.username,
+    )
+    background_tasks.add_task(_generate_strm_after_download_change, "delete")
+    return JSONResponse({"ok": True, **result})
+
+
+@router.post("/downloads/clear-failed", response_class=JSONResponse)
+async def clear_failed_downloads(
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Delete all failed and cancelled download rows."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM downloads WHERE status IN ('failed', 'cancelled')"
+        )
+        count = cursor.rowcount
+        conn.commit()
+    logger.info("[LIBRARY] Cleared %d failed/cancelled downloads by=%s", count, current_user.username)
+    return JSONResponse({"ok": True, "cleared": count})

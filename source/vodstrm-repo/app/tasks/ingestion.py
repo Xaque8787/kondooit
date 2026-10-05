@@ -1,0 +1,229 @@
+"""
+Ingestion tasks — parse downloaded M3U files and sync them to the database.
+
+These tasks are triggered by the downloader after a successful download.
+They are also registerable as standalone scheduled tasks if needed.
+
+Flow per remote provider (m3u / xtream):
+  1. Locate the downloaded .m3u file for the provider slug
+  2. Parse it into structured entry dicts   (ingestion.parser)
+  3. Sync parsed entries to the database    (ingestion.sync)
+  4. Delete the .m3u file to keep disk clean
+
+Flow per local_file provider:
+  Steps 1-3 are the same, but step 4 is skipped — the file is owned by the
+  user and must not be removed. Stale-stream cleanup runs normally; items
+  absent from the file on the current run are removed from the DB.
+"""
+import logging
+import os
+
+from app.config import settings
+from app.database import get_db
+from app.ingestion.parser import parse_m3u
+from app.ingestion.sync import purge_inactive_and_deleted_providers, run_sync
+from app.tasks.base import task
+from app.utils.env import resolve_path
+
+logger = logging.getLogger("app.tasks.ingestion")
+
+_M3U_DIR_RELATIVE = settings.m3u_dir
+
+
+def _m3u_path(provider_slug: str) -> str:
+    m3u_dir = resolve_path(_M3U_DIR_RELATIVE)
+    return os.path.join(m3u_dir, f"{provider_slug}.m3u")
+
+
+def _delete_m3u(file_path: str, provider_slug: str) -> None:
+    try:
+        os.remove(file_path)
+        logger.info("[INGESTION] M3U file deleted after ingest — %s", file_path)
+    except OSError as exc:
+        logger.warning(
+            "[INGESTION] Could not delete M3U file for '%s': %s",
+            provider_slug, exc,
+        )
+
+
+def _get_provider_row(provider_slug: str) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT type, local_file_path, force_vod FROM providers WHERE slug = ?",
+            (provider_slug,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def ingest_provider_file(provider_slug: str) -> None:
+    """
+    Parse and sync a single provider's M3U file.
+
+    For remote providers (m3u / xtream) the downloaded file is deleted after
+    ingestion.  For local_file providers the file is never deleted.
+    """
+    provider = _get_provider_row(provider_slug)
+    is_local = provider is not None and provider["type"] == "local_file"
+
+    if is_local:
+        stored_path = (provider.get("local_file_path") or "").strip()
+        if not stored_path:
+            logger.warning(
+                "[INGESTION] local_file provider '%s' has no file configured", provider_slug
+            )
+            return
+        # stored_path may be absolute (from file browser) or a bare filename
+        # (legacy entries saved before the browser was added)
+        if os.path.isabs(stored_path):
+            file_path = stored_path
+        else:
+            file_path = os.path.join(resolve_path(_M3U_DIR_RELATIVE), stored_path)
+    else:
+        file_path = _m3u_path(provider_slug)
+
+    if not os.path.exists(file_path):
+        logger.warning(
+            "[INGESTION] M3U file not found for provider '%s': %s",
+            provider_slug, file_path,
+        )
+        return
+
+    logger.info(
+        "[INGESTION] Starting ingest — provider=%s  file=%s  local=%s",
+        provider_slug, file_path, is_local,
+    )
+
+    if not provider:
+        logger.warning("[INGESTION] Provider '%s' not found, aborting", provider_slug)
+        return
+
+    parsed = parse_m3u(file_path, provider=provider_slug, force_vod=bool(provider["force_vod"]))
+
+    if not parsed:
+        return
+
+    parse_stats = parsed["summary"]["stats"]
+    logger.info(
+        "[INGESTION] Parse complete — provider=%s  completed=%d  errors=%d",
+        provider_slug,
+        parse_stats.get("entries_completed", 0),
+        parse_stats.get("errors", 0),
+    )
+
+    with get_db() as conn:
+        sync_summary = run_sync(conn, parsed)
+
+    logger.info(
+        "[INGESTION] Sync complete — provider=%s  "
+        "entries[new=%d updated=%d]  streams[new=%d updated=%d]  "
+        "stale_removed=%d  orphans_removed=%d",
+        provider_slug,
+        sync_summary["inserted_entries"],
+        sync_summary["updated_entries"],
+        sync_summary["inserted_streams"],
+        sync_summary["updated_streams"],
+        sync_summary["stale_streams_removed"],
+        sync_summary["orphan_entries_removed"],
+    )
+
+    if not is_local:
+        _delete_m3u(file_path, provider_slug)
+
+
+def _purge() -> None:
+    with get_db() as conn:
+        purge_inactive_and_deleted_providers(conn)
+
+
+@task("ingest_all_providers")
+def ingest_all_providers() -> None:
+    """
+    Ingest M3U files for all active providers.
+
+    For remote providers, scans the M3U directory for downloaded files.
+    For local_file providers, reads the file path from the database.
+
+    After ingestion, streams belonging to inactive or deleted providers are
+    purged so the library only reflects currently active sources.
+    """
+    m3u_dir = resolve_path(_M3U_DIR_RELATIVE)
+
+    with get_db() as conn:
+        all_provider_rows = conn.execute(
+            "SELECT slug, type, local_file_path, is_active, schedule_omitted FROM providers"
+        ).fetchall()
+
+    active_slugs = {
+        r["slug"] for r in all_provider_rows
+        if r["is_active"] and not r["schedule_omitted"]
+    }
+    all_slugs    = {r["slug"] for r in all_provider_rows}
+
+    omitted_count = sum(1 for r in all_provider_rows if r["is_active"] and r["schedule_omitted"])
+    if omitted_count:
+        logger.info("[INGESTION] Skipping %d omitted provider(s)", omitted_count)
+
+    if not active_slugs:
+        logger.info("[INGESTION] No active providers found, nothing to ingest")
+    else:
+        logger.info("[INGESTION] Found %d active provider(s) to ingest", len(active_slugs))
+        for slug in active_slugs:
+            try:
+                ingest_provider_file(slug)
+            except Exception as exc:
+                logger.error(
+                    "[INGESTION] Failed to ingest '%s': %s", slug, exc, exc_info=True
+                )
+
+    _purge()
+
+    # After all providers are ingested, run the global orphan sweep so any
+    # .strm files left over from removed/renamed content are cleaned up.
+    from app.tasks.strm import generate_strm
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error("[INGESTION] Global STRM orphan sweep failed: %s", exc, exc_info=True)
+
+    from app.tasks.live_m3u import generate_live_m3u
+    try:
+        generate_live_m3u()
+    except Exception as exc:
+        logger.error("[INGESTION] Live M3U generation failed: %s", exc, exc_info=True)
+
+    from app.tasks.tmdb import trigger_tmdb_enrichment
+    try:
+        trigger_tmdb_enrichment(triggered_by="ingest:all")
+    except Exception as exc:
+        logger.error("[INGESTION] TMDB trigger failed: %s", exc, exc_info=True)
+
+
+@task("ingest_provider")
+def ingest_provider(provider_slug: str) -> None:
+    """
+    Ingest a single provider's M3U file then run a global STRM resolution pass.
+
+    Ingestion is scoped to one provider; STRM resolution is always global
+    because ownership is determined across all providers simultaneously.
+    """
+    ingest_provider_file(provider_slug)
+    from app.tasks.strm import generate_strm
+    try:
+        generate_strm()
+    except Exception as exc:
+        logger.error(
+            "[INGESTION] STRM sync failed after ingest of '%s': %s", provider_slug, exc, exc_info=True
+        )
+    from app.tasks.live_m3u import generate_live_m3u
+    try:
+        generate_live_m3u()
+    except Exception as exc:
+        logger.error(
+            "[INGESTION] Live M3U generation failed after ingest of '%s': %s", provider_slug, exc, exc_info=True
+        )
+
+    from app.tasks.tmdb import trigger_tmdb_enrichment
+    try:
+        trigger_tmdb_enrichment(triggered_by=f"ingest:{provider_slug}")
+    except Exception as exc:
+        logger.error("[INGESTION] TMDB trigger failed after ingest of '%s': %s", provider_slug, exc, exc_info=True)
