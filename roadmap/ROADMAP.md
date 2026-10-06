@@ -33,6 +33,19 @@ Before beginning implementation work:
 The roadmap does not override the System Vision or accepted architectural
 decisions. It constrains implementation scope, not architecture.
 
+## Current State
+
+| Milestone | Status |
+|---|---|
+| v0.0.1 — Server Foundation, Discovery & Connectivity | Complete |
+| v0.0.2 — Source Providers, Discovery & Resolution | Complete except IPTV (moved to v0.0.3) |
+| Delivered beyond the original plan | Playback, HLS remux/transcode, profiles, watch progress, remote access — see "Delivered Beyond the Original Milestone Plan" |
+| v0.0.3 — Live TV & IPTV | **Next milestone. Planned, not yet authorized for implementation** |
+
+The milestone sections below record what each milestone was scoped to
+include and exclude at the time. Where later work delivered something a
+milestone excluded, the exclusion is kept for history and annotated.
+
 ### The distinction
 
 The roadmap defines **what** to build at each stage, not **how** to build it.
@@ -78,7 +91,7 @@ Implementation
 
 ## v0.0.1 — Server Foundation, Provider-Driven Discovery & Connectivity Validation
 
-**Status: Complete (iroh connectivity validation deferred)**
+**Status: Complete**
 
 All functional goals achieved: Docker Compose deployment, admin
 authentication, TMDB + TVDB metadata providers, provider-driven content
@@ -86,8 +99,9 @@ discovery (trending, popular, genres, search, detail views), user state
 (favorites, following), and a responsive React web client.
 
 iroh connectivity validation was scoped as optional in this milestone
-("A browser-based iroh client is desirable but is not required") and is
-deferred to a later milestone focused on remote access.
+("A browser-based iroh client is desirable but is not required") and was
+deferred. It was later delivered as full remote access (ADR-0017) — see
+"Delivered Beyond the Original Milestone Plan".
 
 ### Goal
 
@@ -281,7 +295,8 @@ features, but actual implementation must remain within the v0.0.1 scope.
          iroh (validation)
 ```
 
-Not yet:
+Not yet (at the end of v0.0.1; most of these have since been delivered —
+see "Current State"):
 
 ```
 Source discovery (local files, IPTV VOD, Debrid, Usenet, etc.)
@@ -357,6 +372,26 @@ There is still **no requirement to play media**.
 ---
 
 ## v0.0.2 — Source Providers, Source Discovery & Source Resolution
+
+**Status: Complete except IPTV**
+
+Delivered: source provider architecture with capability declaration,
+release name parsing, TorBox (cloud search, cache check, resolve),
+Easynews (direct search), the installable scraper module system
+(ADR-0012) with a default module providing Torrentio and MediaFusion
+scrapers, source discovery orchestration with provider priority, and
+source resolution.
+
+Not delivered: IPTV integration. It has been moved into v0.0.3 (Live TV &
+IPTV), where it is planned together with channels, EPG, and IPTV VOD.
+
+Implementation differences from the plan below:
+- Modules live in `scraper_modules/` rather than `modules/`.
+- Source API is `POST /source-providers/search` and
+  `POST /source-providers/resolve` rather than the `GET /api/sources/...`
+  routes listed below.
+- Resolved URLs are passed to the player (playback was delivered later)
+  rather than only displayed.
 
 ### Goal
 
@@ -551,6 +586,10 @@ pipeline entirely.
 
 ##### IPTV Integration
 
+> **Moved to v0.0.3.** Not implemented in v0.0.2. The full plan now lives
+> in [livetv_research.md](../research/livetv_research.md). The text below
+> is kept for history.
+
 IPTV providers offer live TV channels and video-on-demand content via
 standard playlist formats. They are **bundled** with the core — paid
 subscriptions using standard protocols.
@@ -634,7 +673,7 @@ The hash aggregator is the source of hashes that debrid providers then
 cache-check. Without it, debrid providers can only search their own
 cloud storage. Phase 2 completes the full debrid pipeline.
 
-This module is developed in-repo under a `modules/` directory but is
+This module is developed in-repo under a `scraper_modules/` directory but is
 loaded through the module system, not hardcoded into the core.
 
 #### Source Discovery Orchestration (spans both phases)
@@ -740,6 +779,11 @@ browsing is part of the EPG/live TV milestone, not v0.0.2.
 
 ### NOT Included
 
+As scoped at the time. Playback, streaming/proxying, transcoding, remote
+access, profiles, and progress tracking were later delivered — see
+"Delivered Beyond the Original Milestone Plan". Submitting an uncached
+torrent to TorBox is also implemented; monitoring downloads is not.
+
 - No media playback (no video player, no audio player)
 - No streaming or proxying of resolved URLs
 - No transcoding
@@ -787,7 +831,7 @@ browsing is part of the EPG/live TV milestone, not v0.0.2.
 ```
 
 Source providers live in `infrastructure/providers/` (bundled).
-Source resolver modules live in `modules/` (loaded by module system).
+Source resolver modules live in `scraper_modules/` (loaded by module system).
 
 Domain additions:
 
@@ -849,18 +893,9 @@ Source Resolves to Stream URL
   (displayed — not played)
 ```
 
-And for IPTV:
-
-```
-Navigate to IPTV Section
-      ↓
-Browse Channel Categories
-      ↓
-See Channel List with Names and Logos
-      ↓
-Select Channel → See Stream URL
-  (displayed — not played)
-```
+IPTV success criteria moved to v0.0.3. (The original "Navigate to IPTV
+Section" flow is superseded: there is no IPTV section; live channels are
+on the Live TV page and IPTV VOD appears only as source results.)
 
 ### What This Milestone Proves
 
@@ -883,32 +918,85 @@ Select Channel → See Stream URL
 
 ---
 
+## Delivered Beyond the Original Milestone Plan
+
+The following capabilities were implemented after v0.0.2 without a
+dedicated milestone section. They are recorded here so the roadmap
+matches the codebase.
+
+- **Playback engine** — stream handles with direct and proxy modes
+  (ADR-0014, ADR-0015); a web player page.
+- **HLS remux and transcoding** (ADR-0016) — the server probes each
+  source and chooses remux, remux with audio conversion to AAC, or full
+  video transcode to H.264, based on what the browser supports. Seeking
+  beyond the processed point restarts processing at the new position.
+  Profiles can disallow transcoding.
+- **Auto-play** — automatic source selection and next-episode playback.
+- **Profiles** — multiple household profiles with a profile picker and
+  per-profile playback preferences (direct play, remux, transcode,
+  auto-play). Permissions and parental controls are not implemented.
+- **Watch progress** — progress reporting, continue watching, and
+  watched/unwatched state per profile.
+- **Remote access** (ADR-0017) — iroh sidecar on the server, browser
+  runtime, connection link, and tunnel connection page.
+- **Debrid add** — submitting an uncached torrent to TorBox. Monitoring
+  and completion handling are not implemented.
+
+---
+
+## v0.0.3 — Live TV & IPTV
+
+**Status: Planned — not yet authorized for implementation**
+
+The full plan is in [livetv_research.md](../research/livetv_research.md)
+(§5 and the implementation sequence in §6). Supporting ADRs listed in
+its §8 must be written as Proposed before implementation begins.
+
+### Included
+
+- IPTV providers: M3U playlists and Xtream Codes accounts, with
+  scheduled refresh and removal of channels a provider drops
+- Channels and channel groups, with user overrides (name, number,
+  group, guide assignment) and provider-first channel numbering
+- EPG: XMLTV sources, automatic channel matching (exact and fuzzy),
+  manual assignment
+- Live TV page with a time-based guide grid (default) and a channel
+  grid; selecting a channel or airing programme starts playback
+- Live playback in the existing player: info overlay, channel up/down,
+  mini-guide; direct delivery when the device can play the stream,
+  otherwise the existing remux/transcode path, with automatic
+  escalation when a stream fails to play
+- User-set per-provider connection limits, enforced before playback
+- User-Agent settings: household, profile, provider, and channel
+- IPTV VOD as source results on movie and episode pages, with stale
+  cleanup, provider priority, quality detection, and title filters
+
+### NOT Included
+
+- Sharing one provider connection among several viewers
+- Automatic preemption of active streams
+- DVR/recording, timeshift, catch-up, reminders
+- A dedicated IPTV VOD browse section
+- HDHomeRun / Xtream output, .strm files
+- Hardware-accelerated transcoding
+- Native clients (ADR-0018 remains Proposed)
+
+---
+
 ## Subsequent Milestones
 
 Later milestones will be defined as the project progresses. Anticipated
 areas (not yet scoped or prioritized):
 
-- **Playback engine** — direct streaming and server-proxy modes, taking
-  resolved stream URLs from v0.0.2 and playing them in the browser or
-  on a connected device
-- **Remote access** — complete iroh-based connectivity experience
-  (deferred from v0.0.1), production-ready remote access without port
-  forwarding
-- **EPG and live TV** — electronic program guide data, channel
-  scheduling, "what's on now/next" for IPTV channels configured in
-  v0.0.2
-- **Transcoding** — server-side transcoding for devices that cannot
-  play the source format directly
-- **Acquisition** — submitting uncached torrents to debrid providers,
-  monitoring download progress, completed downloads becoming cached
+- **Android / Fire TV client** — per ADR-0018 (Proposed)
+- **Acquisition** — monitoring debrid download progress after an
+  uncached torrent is submitted, completed downloads becoming cached
   sources (per ADR-0004)
 - **Additional debrid providers** — Real-Debrid, Premiumize, AllDebrid,
   OffCloud following the SourceProvider interface established in v0.0.2
 - **Local media provider** — local files as sources (per ADR-0004)
-- **Multi-user profiles and permissions** — household members with
-  separate profiles, parental controls
-- **Watchlist, history, and progress tracking** — watch state that
-  persists across sessions and syncs across devices
+- **Permissions and parental controls** — restrictions per profile
+  (profiles themselves are delivered)
 - **Additional hash sources** — self-hosted hash databases (Bitmagnet,
   Zilean), additional Torrentio-protocol services
 

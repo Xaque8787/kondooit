@@ -209,7 +209,7 @@ Three levels of UA assignment:
 
 **Relevance to Kondooit:**
 - Three-level UA assignment is a proven pattern. Some IPTV providers block or behave differently based on the User-Agent string.
-- Kondooit should implement: system default UA, per-provider UA override. Per-channel UA is over-engineering for initial scope — per-provider covers the common case.
+- Kondooit should implement: system default UA, per-provider UA override. Per-channel UA is over-engineering for initial scope — per-provider covers the common case. (Later superseded by user direction: the plan includes household, profile, provider, and channel levels — see §5.11.5.)
 - A reasonable default UA should be provided (e.g., a common browser UA or VLC UA).
 
 ### 2.6 Scheduled Refresh
@@ -1071,7 +1071,7 @@ Tier 3 is a specialisation of ADR-0014's "transcode" tier (re-encoding only the 
 
 **Choosing the starting tier (before playback):**
 1. If the admin "force proxy" setting is on, start at tier 2 or higher.
-2. If the channel requires a custom User-Agent and the client cannot send custom headers (all browsers), start at tier 2 or higher. Native clients that can send headers still need the UA in the handle — see the open item in §8.
+2. If a User-Agent is configured for the channel (§5.11.5) and the client cannot send custom headers (all browsers), start at tier 2 or higher. Native clients receive the User-Agent in the handle's `headers` field and can stay direct.
 3. Use the channel's cached **probe info** (container, video codec, audio codec) and the client's reported capabilities to select the lowest tier that should work.
 4. If probe info is missing, probe the stream with FFmpeg's probe tool (short timeout, ~5 seconds, using the channel's UA) and cache the result on the channel. If probing fails or times out, start at tier 2 (ADR-0014's safe default for unknown formats).
 
@@ -1127,6 +1127,33 @@ There is no automatic preemption. The message offers "Stop a stream" so the user
 - Session counts are in memory (consistent with ADR-0015's ephemeral handle store). After a server restart all counts reset to zero; this is acceptable because devices re-request playback and are counted again.
 
 **Explicitly rejected:** sharing one provider connection among several viewers of the same channel (restreaming or reusing an existing transcode) to exceed the subscription's limit. Each viewer always uses their own provider connection and counts against the limit.
+
+#### 5.11.5 User-Agent Settings
+
+**What it is:** the User-Agent is a short text label every HTTP request carries, identifying the app making the request (e.g. "VLC/3.0.20"). Some IPTV providers only serve streams to requests that identify as an approved player, and some block unknown ones. This is the "device identity" referred to earlier — they are the same thing.
+
+**Levels** (most specific wins):
+
+| Level | Set where | Typical use |
+|---|---|---|
+| 1. Channel | Channel management (override), or supplied by the provider in the playlist (`#EXTVLCOPT:http-user-agent`) | A single channel that needs a different identity |
+| 2. IPTV provider | IPTV provider settings | The provider requires a specific player identity |
+| 3. Profile | Profile settings | A household member wants their playback to identify as a specific player |
+| 4. Household | IPTV settings (applies to the whole server) | One identity for all IPTV playback |
+| 5. Built-in default | — | Used for server-side requests only when nothing above is set |
+
+Precedence rationale: channel and provider settings exist because a specific provider requires them, so they outrank personal preference. A profile setting applies only to channels and providers that have no requirement of their own. This ordering can be revisited if the profile should take priority.
+
+**Scope:** applies to IPTV live channels and IPTV VOD playback, and to server-side IPTV requests (playlist and guide downloads, probing, remux/transcode). Profile-level settings apply only to playback, since background refreshes are not tied to a profile. Not applied to TorBox, Easynews, or scraper sources.
+
+**Presets:** the settings fields offer common presets (VLC, Kodi, TiviMate, a browser identity) plus a custom value.
+
+**How it reaches playback (decision: option (a) from §8):**
+- **Proxy delivery (tiers 2–4):** the server sends the effective User-Agent on its upstream requests.
+- **Direct delivery to native apps:** the stream handle carries an optional `headers` field (`{"User-Agent": "..."}`) that the app sends when fetching the stream. Requires an ADR superseding ADR-0015.
+- **Direct delivery to browsers:** not possible when any User-Agent is configured at levels 1–4, because browsers cannot change it. Such channels use proxy delivery in the browser. Channels with no configured User-Agent can still be delivered directly.
+
+**Storage:** `user_agent` on `iptv_providers`, `channels`, and `channel_overrides` (already planned); add nullable `iptv_user_agent` to `profiles` and a household-level `iptv_user_agent` server setting.
 
 ### 5.12 What Is NOT in Scope
 
@@ -1188,7 +1215,8 @@ The implementation should be ordered to build each layer on the previous one:
 1. Domain: add `user_agent` fields to provider and channel/override models
 2. Infrastructure: use configured UA for all HTTP requests (M3U download, XC API, XMLTV fetch)
 3. API: UA configuration in provider/channel settings
-4. Web UI: UA fields in provider and channel settings
+4. Web UI: UA fields in provider and channel settings, profile settings, and household IPTV settings, with presets
+5. Application: effective UA resolution (channel → provider → profile → household → built-in), included in direct-mode handles as `headers` for native clients
 
 **Phase 6: Guide and Live Playback** (requires Phases 1–3 and 5)
 1. API: guide endpoint (bulk time-window query, channel pagination)
@@ -1257,7 +1285,7 @@ Before implementation begins, the following ADRs should be created as Proposed:
 
 3. **IPTV VOD as source candidates only** — VOD content from IPTV providers is exclusively a source provider in the unified search pipeline. No dedicated browse section. VODEntry/VODStream separation, content-hash dedup, unsorted as diagnostic dump. Kondooit stores stream URLs in the database — no .strm file generation. (Resolves question 7.4.)
 
-4. **Live TV playback and failure-driven fallback** — applies ADR-0014/0015/0016 to live channels; adds the audio-only conversion step within the transcode tier; client-reported format failures escalate tiers while network failures do not; per-channel/client-type memory of the working tier; stream probing and caching; user-set per-provider connection limits enforced before playback, with no connection sharing. Open item to resolve in this ADR: ADR-0015's direct-mode handle has no field for request headers, so native clients cannot be told a channel's required User-Agent. Options: (a) add an optional `headers` field to direct-mode handles (amends ADR-0015 via a superseding ADR), or (b) always proxy channels that need a custom User-Agent. Recommendation: (a), because it keeps native playback direct and avoids server bandwidth use; until decided, (b) applies.
+4. **Live TV playback and failure-driven fallback** — applies ADR-0014/0015/0016 to live channels; adds the audio-only conversion step within the transcode tier; client-reported format failures escalate tiers while network failures do not; per-channel/client-type memory of the working tier; stream probing and caching; user-set per-provider connection limits enforced before playback, with no connection sharing. Open item to resolve in this ADR: ADR-0015's direct-mode handle has no field for request headers, so native clients cannot be told a channel's required User-Agent. Decided: (a) add an optional `headers` field to direct-mode handles, via a new ADR superseding ADR-0015 (rejected alternative: always proxy channels that need a custom User-Agent). Also records the household/profile/provider/channel User-Agent levels and precedence (§5.11.5).
 
 These ADRs would be created as Proposed, then moved to Accepted when the roadmap authorizes implementation.
 
