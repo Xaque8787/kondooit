@@ -243,7 +243,7 @@ Three levels of UA assignment:
 **Relevance to Kondooit:**
 - Dispatcharr's shared multi-client stream proxy is out of scope. ADR-0014 establishes direct delivery as the default, with proxy as fallback. For live TV, Kondooit applies that chain per viewer (direct, then FFmpeg remux/convert through the server when a device cannot play the stream) — see §5.11.3.
 - The multi-client shared-buffer proxy is a future optimization.
-- Connection counting (max_streams enforcement) is relevant for the future but not for initial scope.
+- Connection counting (max_streams enforcement) is adopted in simplified form: a user-set per-provider connection limit enforced before playback, with no preemption and no stream sharing — see §5.11.4.
 
 ### 2.8 DVR / Recording
 
@@ -424,7 +424,7 @@ Per the project's governing instructions (§5, §14 of CLAUDE.md), every capabil
 | Scheduled refresh (interval-based) | Intrinsic domain functionality | Yes — but simpler mechanism |
 | Task locking (prevent concurrent refresh) | Implementation detail | Yes — simplified to in-process lock |
 | Stream proxy (gevent, Redis buffer) | Implementation choice | No — future capability, not initial scope |
-| Connection counting / preemption | Implementation choice | No — future capability |
+| Connection counting / preemption | Implementation choice | Partial — user-set limit enforced before playback (§5.11.4); no preemption |
 | DVR / Recording | Feature outside scope | No |
 | Schedules Direct | Implementation choice | No — XMLTV only for initial scope |
 | Multi-user profiles | Feature outside scope | No — separate roadmap item |
@@ -790,7 +790,7 @@ Following the project's dual-migration requirement (CLAUDE.md §20):
 
 **New tables:**
 
-1. `iptv_providers` — IPTV provider instances (M3U or XC credentials, config, refresh interval, user agent)
+1. `iptv_providers` — IPTV provider instances (M3U or XC credentials, config, refresh interval, user agent, `max_connections` nullable = no limit)
 2. `channel_groups` — channel group names (provider-created or user-created)
 3. `channels` — live TV channels (provider-supplied data, including cached stream probe info: `probe_container`, `probe_video_codec`, `probe_audio_codec`, `probed_at`)
 4. `channel_overrides` — user customizations (1:1 to channels, all nullable)
@@ -1065,6 +1065,8 @@ In practice the web client will use the proxy path for nearly all IPTV live chan
 | 3. Audio convert | FFmpeg copies video, converts audio to AAC | Low | Video codec is fine, audio codec (AC-3, E-AC-3, MP2) is not |
 | 4. Full transcode | FFmpeg converts video to H.264 and audio to AAC | High (≈1+ CPU core per viewer) | Video codec (MPEG-2, HEVC on unsupported clients) is not playable |
 
+**Confirmed fact (server HLS endpoint source):** the existing on-demand HLS playback path already performs tiers 2–4 — it probes the source, then remuxes, remuxes video while converting audio to AAC, or fully transcodes video to H.264, depending on what the browser supports. Live TV reuses this path and its codec-selection logic; the new work is live-specific input handling (UA, reconnect, no end of stream), failure-driven escalation, and choosing direct delivery when a device can play the stream itself.
+
 Tier 3 is a specialisation of ADR-0014's "transcode" tier (re-encoding only the incompatible stream), not a new delivery mode. In ADR-0015 terms tiers 2–4 are all `mode: "proxy"` with `processing` of `remux` or `transcode` and a `transcode_profile` describing which streams are converted.
 
 **Choosing the starting tier (before playback):**
@@ -1095,11 +1097,36 @@ Escalation is automatic and requires no user action. Each tier is attempted at m
 - Enable FFmpeg's reconnect options for HTTP inputs so short upstream drops do not end the session.
 - Sliding-window HLS playlist with old segments deleted, so long viewing sessions do not grow disk usage.
 - Full transcode targets H.264 at a fast encoder preset with AAC stereo audio, resolution capped at the source resolution. Hardware-accelerated encoding is a future enhancement.
-- One FFmpeg process and one upstream connection per viewer. Two viewers of the same channel use two provider connections (shared-buffer proxying remains out of scope; many IPTV providers limit concurrent connections, which users should be aware of).
+- One FFmpeg process and one upstream connection per viewer. Two viewers of the same channel use two provider connections. Sharing one upstream between viewers is deliberately not done (see §5.11.4).
 
 **Probe info storage:** add nullable columns to `channels`: `probe_container`, `probe_video_codec`, `probe_audio_codec`, `probed_at`. Provider-supplied data on the channel, not an override; refreshed by the server, never edited by users.
 
-**Relationship to the roadmap:** the roadmap lists general transcoding as a later milestone. This plan brings in a limited transcoding capability — the live TV fallback tiers 3 and 4 only — as part of the Live TV milestone. The roadmap should be updated to reflect this when the Live TV milestone is authorized. Transcoding for on-demand (movie/episode) playback is not changed by this plan.
+**Relationship to the roadmap:** the roadmap's v0.0.1/v0.0.2 "No transcoding" exclusions and its "Transcoding" future-milestone entry predate the implemented HLS playback path, which already remuxes and transcodes under ADR-0014/ADR-0016. The roadmap is out of date on this point and should be corrected separately; this plan introduces no new transcoding capability, only applies the existing one to live channels.
+
+#### 5.11.4 Provider Connection Limits
+
+**Problem:** IPTV subscriptions allow a fixed number of simultaneous streams. When the limit is exceeded the provider typically fails the new stream, kills an existing one, or flags the account. Kondooit should prevent this rather than rely on the provider.
+
+**Setting:** each IPTV provider has an optional, user-set **connection limit** (`max_connections`; empty = no limit). Set in IPTV provider settings. Xtream Codes providers report `max_connections` in their account info; when available it is shown as a suggested value, but the user's setting is what is enforced.
+
+**What counts as a connection:** every active stream session whose upstream is that provider — live channels and IPTV VOD movies/episodes alike, in every delivery tier (direct, remux, converted), on every device and profile. Direct-mode sessions count even though bytes do not pass through the server, because the provider still sees a connection from the household.
+
+**Enforcement (before playback):**
+1. The play request identifies the channel's (or VOD stream's) provider.
+2. If the requesting device is switching channel or retrying, its previous session is released first, so switching at the limit works.
+3. If active sessions for that provider are below the limit, the session is created.
+4. Otherwise playback is refused with a clear message: "All 2 connections for <provider> are in use", listing what is using them (profile, device, channel or title). No stream is started, so the provider never sees an over-limit attempt.
+
+There is no automatic preemption. The message offers "Stop a stream" so the user can end one of the listed sessions and then play.
+
+**IPTV VOD in source search:** sources from a provider at its limit are still listed but marked "Provider busy", and selecting one shows the same message. Other providers' sources for the same title remain available, so provider priority (§5.10.2) naturally falls through to a free provider.
+
+**Accurate session tracking:**
+- Proxy-mode sessions end when the device stops requesting the stream (existing staleness cleanup), on explicit stop, or on channel switch.
+- Direct-mode sessions are invisible to the server once started, so the player sends a heartbeat every 30 seconds; a session with no heartbeat for 90 seconds is released. Players also send an explicit stop on close or channel change.
+- Session counts are in memory (consistent with ADR-0015's ephemeral handle store). After a server restart all counts reset to zero; this is acceptable because devices re-request playback and are counted again.
+
+**Explicitly rejected:** sharing one provider connection among several viewers of the same channel (restreaming or reusing an existing transcode) to exceed the subscription's limit. Each viewer always uses their own provider connection and counts against the limit.
 
 ### 5.12 What Is NOT in Scope
 
@@ -1108,7 +1135,8 @@ Escalation is automatic and requires no user action. Each tier is attempted at m
 - Pause/rewind of live TV (timeshift) and catch-up/archive playback of past programmes
 - Programme reminders
 - DVR / recording
-- Connection counting / max streams enforcement
+- Automatic preemption (stopping someone's stream to start another)
+- Sharing one provider connection among multiple viewers to exceed a provider's connection limit (deliberately rejected, §5.11.4)
 - Multi-stream failover per channel
 - Schedules Direct EPG
 - ML-based EPG matching
@@ -1170,7 +1198,8 @@ The implementation should be ordered to build each layer on the previous one:
 5. Infrastructure: extend the existing HLS session manager with live input options (UA, reconnect, sliding window) and the audio-convert / full-transcode profiles
 6. API: channel play endpoint with failure reporting and escalation
 7. Web UI: live mode of the player (overlay, channel up/down, mini-guide, stall watchdog, failure classification, automatic retry/escalation, manual playback mode menu)
-8. Tests: tier selection rules, escalation order, network-vs-format failure handling, session cleanup
+8. Provider connection limits: `max_connections` setting, session counting across live and VOD, heartbeat and stop for direct sessions, "connections in use" message with stop option, "Provider busy" marking in source search
+9. Tests: tier selection rules, escalation order, network-vs-format failure handling, session cleanup, connection limit enforcement including channel switching at the limit
 
 ---
 
@@ -1228,7 +1257,7 @@ Before implementation begins, the following ADRs should be created as Proposed:
 
 3. **IPTV VOD as source candidates only** — VOD content from IPTV providers is exclusively a source provider in the unified search pipeline. No dedicated browse section. VODEntry/VODStream separation, content-hash dedup, unsorted as diagnostic dump. Kondooit stores stream URLs in the database — no .strm file generation. (Resolves question 7.4.)
 
-4. **Live TV playback and failure-driven fallback** — applies ADR-0014/0015/0016 to live channels; adds the audio-only conversion step within the transcode tier; client-reported format failures escalate tiers while network failures do not; per-channel/client-type memory of the working tier; stream probing and caching. Open item to resolve in this ADR: ADR-0015's direct-mode handle has no field for request headers, so native clients cannot be told a channel's required User-Agent. Options: (a) add an optional `headers` field to direct-mode handles (amends ADR-0015 via a superseding ADR), or (b) always proxy channels that need a custom User-Agent. Recommendation: (a), because it keeps native playback direct and avoids server bandwidth use; until decided, (b) applies.
+4. **Live TV playback and failure-driven fallback** — applies ADR-0014/0015/0016 to live channels; adds the audio-only conversion step within the transcode tier; client-reported format failures escalate tiers while network failures do not; per-channel/client-type memory of the working tier; stream probing and caching; user-set per-provider connection limits enforced before playback, with no connection sharing. Open item to resolve in this ADR: ADR-0015's direct-mode handle has no field for request headers, so native clients cannot be told a channel's required User-Agent. Options: (a) add an optional `headers` field to direct-mode handles (amends ADR-0015 via a superseding ADR), or (b) always proxy channels that need a custom User-Agent. Recommendation: (a), because it keeps native playback direct and avoids server bandwidth use; until decided, (b) applies.
 
 These ADRs would be created as Proposed, then moved to Accepted when the roadmap authorizes implementation.
 
@@ -1246,4 +1275,4 @@ These ADRs would be created as Proposed, then moved to Accepted when the roadmap
 
 - **Guide and live playback:** A time-based guide grid is the default Live TV view; selecting a channel or airing programme starts playback. Live channels use the existing direct → remux → transcode chain with an added audio-only conversion step, start at the tier predicted by cached stream probing, and automatically escalate when the device reports a format failure. The working tier is remembered per channel and device type.
 
-- **Scope discipline:** This plan implements only the six features the user specified plus VOD ingestion with full lifecycle management, and the guide/live playback with compatibility fallback. No shared multi-viewer stream buffering, no DVR, no connection counting, no ML matching, no .strm files, no dedicated IPTV VOD browse section. The architecture has clean extension points for future capabilities without implementing them.
+- **Scope discipline:** This plan implements only the six features the user specified plus VOD ingestion with full lifecycle management, and the guide/live playback with compatibility fallback. No shared multi-viewer stream buffering, no DVR, no preemption, no ML matching, no .strm files, no dedicated IPTV VOD browse section. The architecture has clean extension points for future capabilities without implementing them.
