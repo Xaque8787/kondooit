@@ -241,8 +241,8 @@ Three levels of UA assignment:
 - One upstream feed shared across all connected clients
 
 **Relevance to Kondooit:**
-- Stream proxying is out of scope for this phase. ADR-0014 establishes direct delivery as the default, with proxy as fallback. For live TV, direct delivery means the client fetches the stream URL directly from the IPTV provider.
-- The multi-client shared-buffer proxy is a future optimization. Kondooit's initial live TV implementation should hand the stream URL to the client and let it fetch directly.
+- Dispatcharr's shared multi-client stream proxy is out of scope. ADR-0014 establishes direct delivery as the default, with proxy as fallback. For live TV, Kondooit applies that chain per viewer (direct, then FFmpeg remux/convert through the server when a device cannot play the stream) — see §5.11.3.
+- The multi-client shared-buffer proxy is a future optimization.
 - Connection counting (max_streams enforcement) is relevant for the future but not for initial scope.
 
 ### 2.8 DVR / Recording
@@ -699,9 +699,9 @@ Classification cascade (from Vodstrm, proven):
 4. 4-digit year → movie
 5. Fallback → unsorted (retained as diagnostic dump only — NOT browseable, NOT included in source search results)
 
-Quality detection runs after classification. It scans the raw title for quality keywords (4K, 2160p, 1080p, 720p, 480p, HEVC, HDR, etc.) and stores the result as `quality_label` on VODStream. Provider-level `quality_terms` can refine this — see §5.11.
+Quality detection runs after classification. It scans the raw title for quality keywords (4K, 2160p, 1080p, 720p, 480p, HEVC, HDR, etc.) and stores the result as `quality_label` on VODStream. Provider-level `quality_terms` can refine this — see §5.10.3.
 
-Title filtering runs before classification. It applies the provider's configured filter rules and the global default filters to clean up poorly parsed titles — see §5.11.
+Title filtering runs before classification. It applies the provider's configured filter rules and the global default filters to clean up poorly parsed titles — see §5.10.4.
 
 ### 5.5 Infrastructure Layer
 
@@ -761,6 +761,8 @@ PATCH /api/live-tv/channels/{id}        — update override (name, number, group
 POST  /api/live-tv/channels/{id}/match  — trigger single-channel EPG match
 GET  /api/live-tv/channels/{id}/epg     — current program + upcoming (time-range query)
 GET  /api/live-tv/groups                — list channel groups
+GET  /api/live-tv/guide                 — guide grid data for a time window (§5.11.1)
+POST /api/live-tv/channels/{id}/play    — create live stream handle; also used to report failures and escalate (§5.11.2–5.11.3)
 ```
 
 #### IPTV admin endpoints (`api/iptv_admin.py`)
@@ -790,7 +792,7 @@ Following the project's dual-migration requirement (CLAUDE.md §20):
 
 1. `iptv_providers` — IPTV provider instances (M3U or XC credentials, config, refresh interval, user agent)
 2. `channel_groups` — channel group names (provider-created or user-created)
-3. `channels` — live TV channels (provider-supplied data)
+3. `channels` — live TV channels (provider-supplied data, including cached stream probe info: `probe_container`, `probe_video_codec`, `probe_audio_codec`, `probed_at`)
 4. `channel_overrides` — user customizations (1:1 to channels, all nullable)
 5. `epg_sources` — XMLTV EPG source configurations
 6. `epg_channels` — EPG channel entries (from XMLTV)
@@ -822,7 +824,8 @@ The VOD library search uses the same title normalization as EPG matching (lowerc
 ### 5.9 Web UI
 
 New pages:
-- **Live TV page** — channel grid with logos, channel numbers, current program. D-pad/remote friendly for TV.
+- **Live TV page** — guide view (EPG grid, default) and compact channel grid view. D-pad/remote friendly for TV. See §5.11.1.
+- **Live player** — live mode of the existing player: info overlay, channel up/down, mini-guide, automatic compatibility fallback. See §5.11.2–5.11.3.
 - **Channel detail** — current program, upcoming programs, stream info, edit override.
 - **Channel management** — admin view for editing channel numbers, assigning EPG manually, enabling/disabling channels, setting user agents.
 - **IPTV provider settings** — add/edit M3U and XC providers, configure refresh intervals, set user agents, trigger manual refresh.
@@ -968,9 +971,142 @@ When source search queries the VOD library:
          ↓
 ``Return as SourceResult list (all streams, best first)``
 
-### 5.11 What Is NOT in Scope
+### 5.11 Live TV Guide and Channel Playback
 
-- Stream proxy / transcoding for live TV — direct delivery only (client fetches stream URL directly)
+This section defines the guide view (EPG grid), the flow from selecting a channel to watching it, and the compatibility fallback that ensures a channel which cannot play natively on a device is repackaged or converted by the server. It applies the existing delivery decisions (ADR-0014 fallback chain, ADR-0015 stream handles, ADR-0016 HLS remux) to live channels; it does not replace them.
+
+#### 5.11.1 Guide View (EPG Grid)
+
+The guide is the primary Live TV screen. The channel grid from §5.9 remains as an alternate compact view ("Channels"); the guide is the default view ("Guide").
+
+**Layout:**
+- Rows are channels, ordered by effective channel number (override first, then provider number). Each row header shows channel number, logo, and name.
+- Columns are time, in 30-minute slots. A header row shows slot times; a vertical "now" line marks the current time and moves as time passes.
+- Programme blocks are sized by duration and show title and time. The currently airing programme in each row is visually highlighted; elapsed portion shown as a subtle progress fill.
+- Channels with no matched EPG show a single full-width "No guide information" block. They remain fully playable.
+
+**Navigation:**
+- Default window on open: 30 minutes before now to 3 hours after now, scrolled so "now" is near the left edge.
+- Horizontal scroll moves through time; further data loads in 3-hour chunks as the user scrolls, up to the furthest programme available in the EPG (typically 1–7 days, provider-dependent). Past programmes are shown back to the start of the current day only (no catch-up in scope).
+- Vertical scroll is virtualized (only visible rows rendered) because providers commonly supply hundreds to thousands of channels.
+- "Jump to now" control returns the window to the current time.
+- Group filter (channel groups from §5.3) narrows the rows; "All channels" is default. Disabled channels never appear.
+- D-pad/remote: arrow keys move focus between programme blocks (left/right through time, up/down through channels, keeping the focused time position), Enter activates, Back closes overlays. Focus is always visible.
+
+**Selecting things in the guide:**
+- **Channel row header** → starts playback of that channel immediately.
+- **Currently airing programme** → starts playback of that channel immediately.
+- **Future or past programme** → opens a programme detail drawer (title, time range, description, episode info, channel). The drawer offers "Watch channel now" (plays the channel live). No reminders or recording (out of scope).
+
+**Guide API:** one bulk request returns everything needed for a time window, avoiding one request per channel.
+
+```
+GET /api/live-tv/guide?start=<iso>&end=<iso>&group_id=<optional>&offset=&limit=
+→ {
+    window: { start, end },
+    channels: [
+      { id, number, name, logo_url, group_id, has_epg,
+        programs: [ { id, title, start, end, description, episode_info } ] }
+    ],
+    total_channels
+  }
+```
+
+- Window capped at 12 hours per request; programmes overlapping the window edges are included.
+- Channel pagination (`offset`/`limit`, default 100) supports virtualized vertical scrolling.
+- Uses effective channel values (overrides applied) — same resolution as the channel list endpoint.
+
+#### 5.11.2 Channel Playback Flow
+
+```
+User selects channel (guide, channel grid, or channel detail)
+         ↓
+Client: POST /api/live-tv/channels/{id}/play
+        { client_capabilities, previous_stream_id?, failure? }
+         ↓
+Server: resolve effective channel (override → stream URL, user agent)
+         ↓
+Server: choose delivery tier (§5.11.3) using cached probe info,
+        client capabilities, admin "force proxy", and any reported failure
+         ↓
+Server: create stream handle (ADR-0015) marked live
+         ↓
+Client: mode "direct" → play URL     mode "proxy" → play /hls/{stream_id}/master.m3u8
+         ↓
+Live player opens
+```
+
+**Live player behavior** (live mode of the existing player page, not a separate player):
+- No seek bar, no resume position, no watch-progress reporting — live content has no resume point.
+- Overlay (shown on open, on input, auto-hides after a few seconds): channel number/logo/name, current programme with progress, next programme.
+- Channel up/down (keys, remote buttons, on-screen controls) switches to the adjacent channel by number within the current group filter. Switching ends the previous stream session before starting the next.
+- Mini-guide overlay: a compact list of channels with "now" programmes for quick switching without leaving the player.
+- While the server is preparing a compatible stream, the player shows "Preparing stream for this device…" rather than a blank screen.
+
+**Stream session lifecycle for live:** a live handle never "finishes". Direct-mode live sessions are released when the client stops or switches channel. Proxy-mode sessions are released on stop or when the client stops requesting playlist/segments for the staleness timeout (ADR-0016's existing cleanup), which kills the FFmpeg process and deletes temporary segments.
+
+#### 5.11.3 Format Compatibility and Fallback Chain
+
+**Why this is needed (confirmed from research):** IPTV live streams are most commonly MPEG-TS over HTTP, sometimes provider-hosted HLS. Codecs are usually H.264 + AAC, but MPEG-2 video, HEVC, and AC-3 / E-AC-3 / MP2 audio are common on some providers. Browsers cannot play MPEG-TS directly, cannot decode AC-3/MP2 audio in most cases, and often cannot decode HEVC or MPEG-2. Native players (Android/Fire TV, ADR-0018) handle far more but still fail on some combinations.
+
+**Additional browser constraints (assumption, to verify during implementation):**
+- Most IPTV providers do not send CORS headers, so a browser cannot fetch their streams or HLS playlists directly from another origin.
+- Many providers serve plain `http://`; a Kondooit web UI served over `https://` is blocked from loading them (mixed content).
+- Browsers cannot set a custom User-Agent header, so channels that require one (§5.5 per-provider/per-channel UA) cannot be fetched directly by a browser.
+
+In practice the web client will use the proxy path for nearly all IPTV live channels. Native clients will use direct delivery for most channels.
+
+**Delivery tiers** (ADR-0014 order, with one added low-cost step):
+
+| Tier | What the server does | Server CPU | When used |
+|---|---|---|---|
+| 1. Direct | Nothing; client plays the provider URL | None | Client can play container + codecs natively, and can reach the URL (CORS/https/UA not a problem) |
+| 2. Remux | FFmpeg copies audio and video into HLS (fMP4 segments) — existing ADR-0016 path | Near zero | Container or reachability is the problem; codecs are fine |
+| 3. Audio convert | FFmpeg copies video, converts audio to AAC | Low | Video codec is fine, audio codec (AC-3, E-AC-3, MP2) is not |
+| 4. Full transcode | FFmpeg converts video to H.264 and audio to AAC | High (≈1+ CPU core per viewer) | Video codec (MPEG-2, HEVC on unsupported clients) is not playable |
+
+Tier 3 is a specialisation of ADR-0014's "transcode" tier (re-encoding only the incompatible stream), not a new delivery mode. In ADR-0015 terms tiers 2–4 are all `mode: "proxy"` with `processing` of `remux` or `transcode` and a `transcode_profile` describing which streams are converted.
+
+**Choosing the starting tier (before playback):**
+1. If the admin "force proxy" setting is on, start at tier 2 or higher.
+2. If the channel requires a custom User-Agent and the client cannot send custom headers (all browsers), start at tier 2 or higher. Native clients that can send headers still need the UA in the handle — see the open item in §8.
+3. Use the channel's cached **probe info** (container, video codec, audio codec) and the client's reported capabilities to select the lowest tier that should work.
+4. If probe info is missing, probe the stream with FFmpeg's probe tool (short timeout, ~5 seconds, using the channel's UA) and cache the result on the channel. If probing fails or times out, start at tier 2 (ADR-0014's safe default for unknown formats).
+
+Probe info is cached per channel and refreshed when older than 24 hours, when the channel's stream URL changes on provider refresh, or after a format failure on that channel.
+
+**Escalating when a stream fails to play (after playback starts):**
+
+Failures are classified by the client into two kinds, using the player's own error reporting (browser media errors / hls.js error types; native player decoder vs. network errors):
+
+- **Format failure** — decoder or "source not supported" errors, or a **stall watchdog**: no new video frames within 15 seconds of starting. → Client calls the play endpoint again with `previous_stream_id` and `failure: "format"`. Server escalates to the next tier above the one that failed.
+- **Network failure** — connection dropped, provider error, timeout. → Client retries the **same** tier once (live streams drop occasionally). A second consecutive network failure is shown to the user; network failures do not escalate tiers, because remuxing or converting cannot fix an unreachable provider.
+
+The server can also escalate on its own: if FFmpeg exits with a codec/container error during remux (tier 2), the server restarts that session at tier 3 or 4 without a client round trip.
+
+Escalation is automatic and requires no user action. Each tier is attempted at most once per playback attempt. If tier 4 fails, the player shows a clear error ("This channel couldn't be played on this device") with "Try again".
+
+**Remembering what works:** the server remembers the tier that succeeded per channel and client type (web, Android, etc.), so the next time that channel is played on that kind of device it starts at the working tier instead of repeating failures. This memory is held in memory, and is cleared when probe info is refreshed or the channel's stream URL changes.
+
+**Manual override (progressive disclosure):** the player's settings menu offers "Playback mode: Automatic (default) / Original / Compatible / Converted", mapping to automatic selection, tier 1, tier 2, and tier 4. A manual choice applies to the current playback only.
+
+**Live-specific FFmpeg behavior** (infrastructure detail, recorded for implementation):
+- Pass the channel's effective User-Agent to FFmpeg for upstream requests.
+- Enable FFmpeg's reconnect options for HTTP inputs so short upstream drops do not end the session.
+- Sliding-window HLS playlist with old segments deleted, so long viewing sessions do not grow disk usage.
+- Full transcode targets H.264 at a fast encoder preset with AAC stereo audio, resolution capped at the source resolution. Hardware-accelerated encoding is a future enhancement.
+- One FFmpeg process and one upstream connection per viewer. Two viewers of the same channel use two provider connections (shared-buffer proxying remains out of scope; many IPTV providers limit concurrent connections, which users should be aware of).
+
+**Probe info storage:** add nullable columns to `channels`: `probe_container`, `probe_video_codec`, `probe_audio_codec`, `probed_at`. Provider-supplied data on the channel, not an override; refreshed by the server, never edited by users.
+
+**Relationship to the roadmap:** the roadmap lists general transcoding as a later milestone. This plan brings in a limited transcoding capability — the live TV fallback tiers 3 and 4 only — as part of the Live TV milestone. The roadmap should be updated to reflect this when the Live TV milestone is authorized. Transcoding for on-demand (movie/episode) playback is not changed by this plan.
+
+### 5.12 What Is NOT in Scope
+
+- Shared upstream / multi-viewer stream buffering for live TV (one upstream connection per viewer)
+- Hardware-accelerated transcoding
+- Pause/rewind of live TV (timeshift) and catch-up/archive playback of past programmes
+- Programme reminders
 - DVR / recording
 - Connection counting / max streams enforcement
 - Multi-stream failover per channel
@@ -1008,7 +1144,7 @@ The implementation should be ordered to build each layer on the previous one:
 **Phase 3: Channel Management**
 1. Application: channel override resolution (effective values)
 2. API: channel listing, channel update (override), channel enable/disable
-3. Web UI: Live TV page, channel grid, channel detail, channel management
+3. Web UI: channel grid, channel detail, channel management
 
 **Phase 4: VOD Ingestion**
 1. Domain entities (VODEntry, VODStream with batch_id and quality_label, FilterRule)
@@ -1025,6 +1161,16 @@ The implementation should be ordered to build each layer on the previous one:
 2. Infrastructure: use configured UA for all HTTP requests (M3U download, XC API, XMLTV fetch)
 3. API: UA configuration in provider/channel settings
 4. Web UI: UA fields in provider and channel settings
+
+**Phase 6: Guide and Live Playback** (requires Phases 1–3 and 5)
+1. API: guide endpoint (bulk time-window query, channel pagination)
+2. Web UI: guide view with virtualized rows, time scrolling, jump to now, group filter, programme detail drawer, D-pad navigation
+3. Infrastructure: stream probing with caching on channel (probe columns migration)
+4. Application: live delivery-tier selection (direct → remux → audio convert → full transcode) and per-channel/client-type memory of working tier
+5. Infrastructure: extend the existing HLS session manager with live input options (UA, reconnect, sliding window) and the audio-convert / full-transcode profiles
+6. API: channel play endpoint with failure reporting and escalation
+7. Web UI: live mode of the player (overlay, channel up/down, mini-guide, stall watchdog, failure classification, automatic retry/escalation, manual playback mode menu)
+8. Tests: tier selection rules, escalation order, network-vs-format failure handling, session cleanup
 
 ---
 
@@ -1082,6 +1228,8 @@ Before implementation begins, the following ADRs should be created as Proposed:
 
 3. **IPTV VOD as source candidates only** — VOD content from IPTV providers is exclusively a source provider in the unified search pipeline. No dedicated browse section. VODEntry/VODStream separation, content-hash dedup, unsorted as diagnostic dump. Kondooit stores stream URLs in the database — no .strm file generation. (Resolves question 7.4.)
 
+4. **Live TV playback and failure-driven fallback** — applies ADR-0014/0015/0016 to live channels; adds the audio-only conversion step within the transcode tier; client-reported format failures escalate tiers while network failures do not; per-channel/client-type memory of the working tier; stream probing and caching. Open item to resolve in this ADR: ADR-0015's direct-mode handle has no field for request headers, so native clients cannot be told a channel's required User-Agent. Options: (a) add an optional `headers` field to direct-mode handles (amends ADR-0015 via a superseding ADR), or (b) always proxy channels that need a custom User-Agent. Recommendation: (a), because it keeps native playback direct and avoids server bandwidth use; until decided, (b) applies.
+
 These ADRs would be created as Proposed, then moved to Accepted when the roadmap authorizes implementation.
 
 ---
@@ -1096,4 +1244,6 @@ These ADRs would be created as Proposed, then moved to Accepted when the roadmap
 
 - **VOD lifecycle management:** Stale content is cleaned up via batch-based reconciliation (content dropped by a provider is removed). Duplicate entries across providers are handled by provider priority (all streams kept, ranked by priority → quality → freshness). Quality terms detect quality from stream titles (global defaults auto-applied, per-provider overrides optional). Title filters clean up poorly parsed titles (global cleanup defaults auto-applied, per-provider exclude and replacement rules user-configured).
 
-- **Scope discipline:** This plan implements only the six features the user specified plus VOD ingestion with full lifecycle management. No stream proxy, no DVR, no connection counting, no ML matching, no .strm files, no dedicated IPTV VOD browse section. The architecture has clean extension points for future capabilities without implementing them.
+- **Guide and live playback:** A time-based guide grid is the default Live TV view; selecting a channel or airing programme starts playback. Live channels use the existing direct → remux → transcode chain with an added audio-only conversion step, start at the tier predicted by cached stream probing, and automatically escalate when the device reports a format failure. The working tier is remembered per channel and device type.
+
+- **Scope discipline:** This plan implements only the six features the user specified plus VOD ingestion with full lifecycle management, and the guide/live playback with compatibility fallback. No shared multi-viewer stream buffering, no DVR, no connection counting, no ML matching, no .strm files, no dedicated IPTV VOD browse section. The architecture has clean extension points for future capabilities without implementing them.
