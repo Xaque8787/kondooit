@@ -13,3 +13,4 @@ email-validator<3,>=2.0
 [dev]
 pytest<10,>=8.0
 pytest-asyncio<2,>=0.24
+aiosqlite<1,>=0.20

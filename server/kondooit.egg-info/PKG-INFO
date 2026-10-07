@@ -17,3 +17,4 @@ Requires-Dist: email-validator<3,>=2.0
 Provides-Extra: dev
 Requires-Dist: pytest<10,>=8.0; extra == "dev"
 Requires-Dist: pytest-asyncio<2,>=0.24; extra == "dev"
+Requires-Dist: aiosqlite<1,>=0.20; extra == "dev"
