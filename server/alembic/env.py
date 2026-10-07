@@ -1,7 +1,9 @@
 """Alembic environment configuration.
 
-Uses async SQLAlchemy engine with the Kondooit ORM models' metadata
-as the target for autogenerate.
+Normally invoked by kondooit.infrastructure.schema at server startup,
+which passes its own connection. Running the alembic CLI directly (for
+example to generate a new revision) falls back to an async engine built
+from application settings.
 """
 
 from __future__ import annotations
@@ -14,25 +16,15 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from kondooit.config import Settings
-from kondooit.infrastructure.models import Base
-from kondooit.infrastructure.profile_repo import ProfileModel  # noqa: F401
-from kondooit.infrastructure.user_state_repo import UserContentStateModel  # noqa: F401
-from kondooit.infrastructure.watch_progress_repo import WatchProgressModel  # noqa: F401
+from kondooit.infrastructure.schema import metadata
 
 config = context.config
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-settings = Settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
-
-target_metadata = Base.metadata
+target_metadata = metadata
 
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -58,7 +50,15 @@ async def run_migrations_online() -> None:
     await connectable.dispose()
 
 
-if context.is_offline_mode():
-    run_migrations_offline()
+shared_connection = config.attributes.get("connection")
+
+if shared_connection is not None:
+    do_run_migrations(shared_connection)
 else:
-    asyncio.run(run_migrations_online())
+    if config.config_file_name is not None:
+        fileConfig(config.config_file_name)
+    config.set_main_option("sqlalchemy.url", Settings().database_url)
+    if context.is_offline_mode():
+        run_migrations_offline()
+    else:
+        asyncio.run(run_migrations_online())

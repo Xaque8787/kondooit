@@ -257,33 +257,12 @@ Before beginning v0.0.1 implementation, consult `roadmap/ROADMAP.md` for the ful
 
 v0.0.1 explicitly excludes: media playback, streaming, transcoding, Debrid/Usenet/IPTV/torrent/local-media providers, EPG, acquisition, multi-user profiles, and server-side stream proxying. The architecture may establish interfaces for future features, but actual implementation must remain within the v0.0.1 scope.
 
-Database Migration and Schema Consistency
-Every time a database schema change is needed, two things must happen:
+## 20. Database Schema and Migrations
 
-1. Create the incremental migration
-Write a new Bolt Database migration (via apply_migration) that makes the specific change (ALTER TABLE, CREATE TABLE, add column, etc.). This migration handles upgrades for existing deployments that already have the previous schema in place.
+Defined by [ADR-0019](decisions/ADR-0019-schema-owned-by-models-alembic-for-alterations.md). The server runs against its own PostgreSQL via Docker Compose; hosted-database tooling (Supabase, `apply_migration`, RLS policies) is not used by Kondooit and must not be added.
 
-2. Update the initial schema migration
-Apply the same logical change to the initial schema migration (0001_initial_schema.sql and its corresponding Alembic version). The initial schema must always represent the complete, current state of the database as if the app were being set up from scratch today.
-
-Why both: A fresh deployment should be able to run just the initial migration and arrive at a fully correct schema. Incremental migrations exist for existing deployments that need to evolve. If we only create incremental migrations without updating the initial state, new deployments accumulate unnecessary migration steps and the "source of truth" for the schema becomes scattered across dozens of files.
-
-Rules
-Never create a migration without also updating the initial schema to reflect the same end state.
-The initial schema migration is the canonical "what does the database look like right now" document. It must always be deployable standalone (ignoring subsequent migrations) and produce the current schema.
-Incremental migrations are the canonical "how do we get an existing database from state A to state B" documents.
-When adding a column with a default, the initial schema includes it from the start (no ALTER needed). The incremental migration uses ALTER TABLE ADD COLUMN for existing deployments.
-When creating a new table, add it to the initial schema AND create an incremental migration so existing deployments get it too.
-Do not leave the initial schema stale. If you are unsure whether it matches the current state, read it and verify before proceeding.
-Alembic versions (server-side)
-The same principle applies to the Alembic migration versions under server/alembic/versions/. The 0001_initial_schema.py Alembic version must always reflect the full current schema (all tables, columns, indexes, constraints). New Alembic versions handle incremental upgrades for existing databases.
-
-In practice
-When asked to add a feature that requires a new table or column:
-
-Read the current initial schema migration to understand the existing state.
-Edit the initial schema migration to include the new table/column as if it always existed.
-Edit the Alembic 0001_initial_schema.py to match.
-Create a new incremental Bolt Database migration (via apply_migration) for existing deployments.
-Create a new incremental Alembic version for existing server databases.
-This ensures fresh deployments and existing deployments both arrive at the same schema.
+- **The SQLAlchemy models are the complete schema.** Every table, column, index, and constraint is defined in the models. Nothing may exist only in a migration.
+- **Startup owns initialization.** `kondooit.infrastructure.schema.initialize_schema` creates missing tables from the models, stamps a database with no recorded revision at `head`, and otherwise runs `alembic upgrade head`. All of this happens in one transaction, and failure aborts startup. New model modules must be imported in `schema.py` so their tables are registered.
+- **New table:** add the model only. Do not write a migration.
+- **Change to an existing table** (add, remove, or rename a column; change a constraint or index; backfill data): change the model, then add an Alembic revision under `server/alembic/versions/` that checks current state before acting (for example, using `sa.inspect(op.get_bind())`). The revision must be a no-op on a database freshly created from the models.
+- `0001_baseline` is empty and marks the schema as of ADR-0019. Do not add table creation to it.

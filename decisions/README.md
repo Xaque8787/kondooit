@@ -61,3 +61,4 @@ Status transitions:
 - [ADR-0016: HLS remux for web playback](ADR-0016-hls-remux-for-web-playback.md)
 - [ADR-0017: iroh remote access architecture — sidecar endpoint, browser runtime, and delivery modes](ADR-0017-iroh-remote-access-architecture.md)
 - [ADR-0018: Android / Fire TV client architecture — Kotlin UI with shared Rust core via uniFFI](ADR-0018-android-fire-tv-client-architecture.md) (Proposed)
+- [ADR-0019: Database schema owned by ORM models and initialized at startup; Alembic only for alterations](ADR-0019-schema-owned-by-models-alembic-for-alterations.md)

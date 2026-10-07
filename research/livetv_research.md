@@ -786,7 +786,7 @@ POST /api/iptv/epg/match                — trigger bulk EPG matching
 
 ### 5.7 Database Schema (New Tables)
 
-Following the project's dual-migration requirement (CLAUDE.md §20):
+Following ADR-0019 (CLAUDE.md §20), all of these are new tables: they are added as SQLAlchemy models only and created at startup. No migrations are needed.
 
 **New tables:**
 
@@ -801,9 +801,7 @@ Following the project's dual-migration requirement (CLAUDE.md §20):
 9. `iptv_vod_streams` — per-provider stream URLs for VOD entries (includes `quality_label`, `batch_id` for stale cleanup)
 10. `iptv_filters` — per-provider filter rules (exclude and title replacement rules)
 
-Each table needs the standard: creation migration (via `apply_migration`), update to initial schema migration (0001), and Alembic version.
-
-**RLS policies:** All tables use `TO authenticated` since this is a single-admin household server. Standard 4 policies per table (SELECT, INSERT, UPDATE, DELETE).
+**Access control:** enforced by the API layer (authenticated administrator), consistent with the rest of the server.
 
 ### 5.8 Integration with Existing Source Discovery
 
@@ -1153,7 +1151,7 @@ Precedence rationale: channel and provider settings exist because a specific pro
 - **Direct delivery to native apps:** the stream handle carries an optional `headers` field (`{"User-Agent": "..."}`) that the app sends when fetching the stream. Requires an ADR superseding ADR-0015.
 - **Direct delivery to browsers:** not possible when any User-Agent is configured at levels 1–4, because browsers cannot change it. Such channels use proxy delivery in the browser. Channels with no configured User-Agent can still be delivered directly.
 
-**Storage:** `user_agent` on `iptv_providers`, `channels`, and `channel_overrides` (already planned); add nullable `iptv_user_agent` to `profiles` and a household-level `iptv_user_agent` server setting.
+**Storage:** `user_agent` on `iptv_providers`, `channels`, and `channel_overrides` (already planned); add nullable `iptv_user_agent` to `profiles` (an existing table, so this is a model change plus a guarded Alembic revision per ADR-0019) and a household-level `iptv_user_agent` server setting.
 
 ### 5.12 What Is NOT in Scope
 
@@ -1186,7 +1184,7 @@ The implementation should be ordered to build each layer on the previous one:
 3. Infrastructure: SQLAlchemy models + repositories
 4. Application: ingestion service (fetch → parse → persist → cleanup stale)
 5. API: provider CRUD, manual refresh trigger
-6. Database migrations
+6. Register the new models in the startup schema routine
 7. Scheduler setup (APScheduler, interval jobs)
 
 **Phase 2: EPG**
@@ -1221,7 +1219,7 @@ The implementation should be ordered to build each layer on the previous one:
 **Phase 6: Guide and Live Playback** (requires Phases 1–3 and 5)
 1. API: guide endpoint (bulk time-window query, channel pagination)
 2. Web UI: guide view with virtualized rows, time scrolling, jump to now, group filter, programme detail drawer, D-pad navigation
-3. Infrastructure: stream probing with caching on channel (probe columns migration)
+3. Infrastructure: stream probing with caching on channel (probe columns on the channel model)
 4. Application: live delivery-tier selection (direct → remux → audio convert → full transcode) and per-channel/client-type memory of working tier
 5. Infrastructure: extend the existing HLS session manager with live input options (UA, reconnect, sliding window) and the audio-convert / full-transcode profiles
 6. API: channel play endpoint with failure reporting and escalation

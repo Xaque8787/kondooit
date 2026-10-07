@@ -58,6 +58,7 @@ from kondooit.infrastructure.repositories import (
 )
 from kondooit.infrastructure.scraper_loader import load_module
 from kondooit.infrastructure.scraper_module_repo import ScraperModuleRepository
+from kondooit.infrastructure.schema import initialize_schema
 from kondooit.infrastructure.source_provider_repo import SqlAlchemySourceProviderConfigRepository
 from kondooit.infrastructure.profile_repo import SqlAlchemyProfileRepository
 from kondooit.infrastructure.user_state_repo import SqlAlchemyUserContentStateRepository
@@ -226,9 +227,7 @@ def create_app(settings: Settings | None = None) -> Litestar:
     async def lifespan(app: Litestar) -> AsyncIterator[None]:
         app.state.session_factory = session_factory
         app.state.auth_service = auth_service
-        from kondooit.infrastructure.models import Base
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        await initialize_schema(engine)
 
         # Re-load previously-installed scraper modules from DB
         async with session_factory() as session:
