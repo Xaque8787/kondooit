@@ -247,6 +247,10 @@ The exact remote access UX can evolve later.
 
 ### NOT Included
 
+As scoped at the time. Playback, streaming/proxying, remux and basic
+transcoding, remote access, user state, and profiles were later
+delivered — see "Delivered Beyond the Original Milestone Plan".
+
 - No media acquisition, source discovery, source resolution, or playback
   capabilities
 - No Debrid provider integration
@@ -299,12 +303,12 @@ Not yet (at the end of v0.0.1; most of these have since been delivered —
 see "Current State"):
 
 ```
-Source discovery (local files, IPTV VOD, Debrid, Usenet, etc.)
-Playback
-Transcoding
-Production remote access UX
-User state (favorites, watch history, progress)
-Multi-user profiles and permissions
+Source discovery (local files, IPTV VOD, Debrid, Usenet, etc.)  -> Debrid and Usenet delivered; IPTV VOD and local files not yet
+Playback                                                        -> delivered
+Transcoding                                                     -> delivered (basic FFmpeg remux, audio conversion, H.264 transcode)
+Production remote access UX                                     -> delivered (ADR-0017)
+User state (favorites, watch history, progress)                 -> delivered
+Multi-user profiles and permissions                             -> profiles delivered; permissions not yet
 ```
 
 ### Success Criteria

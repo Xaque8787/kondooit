@@ -255,7 +255,7 @@ Before beginning v0.0.1 implementation, consult `roadmap/ROADMAP.md` for the ful
 - Media catalog UI (React + TypeScript)
 - Initial iroh connectivity validation (optional transport, independent of HTTP; browser-based iroh client desirable but not required)
 
-v0.0.1 explicitly excludes: media playback, streaming, transcoding, Debrid/Usenet/IPTV/torrent/local-media providers, EPG, acquisition, multi-user profiles, and server-side stream proxying. The architecture may establish interfaces for future features, but actual implementation must remain within the v0.0.1 scope.
+v0.0.1 explicitly excludes: media playback, streaming, transcoding, Debrid/Usenet/IPTV/torrent/local-media providers, EPG, acquisition, multi-user profiles, and server-side stream proxying. The architecture may establish interfaces for future features, but actual implementation must remain within the v0.0.1 scope. These exclusions describe v0.0.1 as originally scoped; playback, streaming/proxying, remux and basic transcoding, Debrid/Usenet providers, and profiles have since been delivered — see the "Delivered Beyond the Original Milestone Plan" section of `roadmap/ROADMAP.md` for current state.
 
 ## 20. Database Schema and Migrations
 

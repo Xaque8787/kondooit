@@ -62,3 +62,7 @@ Status transitions:
 - [ADR-0017: iroh remote access architecture — sidecar endpoint, browser runtime, and delivery modes](ADR-0017-iroh-remote-access-architecture.md)
 - [ADR-0018: Android / Fire TV client architecture — Kotlin UI with shared Rust core via uniFFI](ADR-0018-android-fire-tv-client-architecture.md) (Proposed)
 - [ADR-0019: Database schema owned by ORM models and initialized at startup; Alembic only for alterations](ADR-0019-schema-owned-by-models-alembic-for-alterations.md)
+- [ADR-0020: IPTV providers are a distinct capability, not a SourceProvider](ADR-0020-iptv-provider-architecture.md) (Proposed)
+- [ADR-0021: EPG and channel domain model](ADR-0021-epg-and-channel-domain-model.md) (Proposed)
+- [ADR-0022: IPTV VOD is source candidates only](ADR-0022-iptv-vod-as-source-candidates-only.md) (Proposed)
+- [ADR-0023: Live TV playback, failure-driven fallback, and stream handle headers](ADR-0023-live-tv-playback-and-failure-driven-fallback.md) (Proposed; supersedes ADR-0015 on acceptance)

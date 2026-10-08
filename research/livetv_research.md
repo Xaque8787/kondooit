@@ -441,7 +441,8 @@ Per the project's governing instructions (§5, §14 of CLAUDE.md), every capabil
 | Xtream Codes API (same endpoints as Dispatcharr) | Intrinsic domain functionality | Yes |
 | Two-tier series handling (catalog + lazy episodes) | Implementation choice | Yes — catalog-first for quick browseability |
 | .strm file generation | Ecosystem workaround | No — Kondooit stores stream URLs in the database directly; it does not need .strm files since it IS the media server |
-| Filter engine (replace/remove/exclude/include_only) | Implementation choice | Simplified — basic exclude filters only |
+| Default title parser (truncate at classifying token) | Intrinsic domain functionality | Yes — mimicked as Kondooit's default VOD title derivation (§5.10.4) |
+| Filter engine (replace/remove/exclude/include_only) | Implementation choice | Deferred — optional per-provider remove/replace terms only, after parsing (§5.10.4) |
 | Follow rules (import_selected mode) | Implementation choice | No — generate_all only |
 | Download queue | Feature outside scope | No |
 | TMDB enrichment | Overlap with existing Kondooit capability | No — Kondooit already has TMDB metadata |
@@ -690,18 +691,18 @@ Two-mode: bulk (85/60) and single-channel (80/50). Single-channel is more aggres
 
 #### VOD ingestion service (`application/vod_ingestion_service.py`)
 
-Orchestrates: parse provider → apply title filters → classify entries → compute content hashes → dedup across providers → detect quality → persist with batch_id → cleanup stale streams → cleanup orphaned entries.
+Orchestrates: parse provider → classify entries and derive clean titles (default parser) → detect quality → compute content hashes → dedup across providers → persist with batch_id → cleanup stale streams → cleanup orphaned entries.
 
-Classification cascade (from Vodstrm, proven):
+Classification cascade (from Vodstrm, proven). The same step derives `cleaned_title` by truncating the name at the classifying token. Full rules are in §5.10.4.
 1. `duration == "-1"` and not `force_vod` → live (skip, not VOD)
-2. SxxExx pattern → series
+2. SxxExx (or NxN) pattern → series
 3. Air-date pattern → tv_vod
-4. 4-digit year → movie
+4. 4-digit year (last occurrence) → movie
 5. Fallback → unsorted (retained as diagnostic dump only — NOT browseable, NOT included in source search results)
 
 Quality detection runs after classification. It scans the raw title for quality keywords (4K, 2160p, 1080p, 720p, 480p, HEVC, HDR, etc.) and stores the result as `quality_label` on VODStream. Provider-level `quality_terms` can refine this — see §5.10.3.
 
-Title filtering runs before classification. It applies the provider's configured filter rules and the global default filters to clean up poorly parsed titles — see §5.10.4.
+Clean titles come from the default parser, not from a separate clean-up pass. Optional user-defined remove/replace terms are a later, separate feature that runs after parsing and never changes content identity — see §5.10.4.
 
 ### 5.5 Infrastructure Layer
 
@@ -799,7 +800,7 @@ Following ADR-0019 (CLAUDE.md §20), all of these are new tables: they are added
 7. `programs` — EPG programme/schedule entries
 8. `iptv_vod_entries` — IPTV VOD content identity (deduped across providers)
 9. `iptv_vod_streams` — per-provider stream URLs for VOD entries (includes `quality_label`, `batch_id` for stale cleanup)
-10. `iptv_filters` — per-provider filter rules (exclude and title replacement rules)
+10. `iptv_filters` — per-provider user remove/replace terms. Created only when the optional title filters (§5.10.4) are implemented; not part of the initial VOD work.
 
 **Access control:** enforced by the API layer (authenticated administrator), consistent with the rest of the server.
 
@@ -909,65 +910,98 @@ Each IPTV provider can optionally specify `quality_terms` — a list of custom r
 
 **UI:** The IPTV provider settings page shows the global defaults and allows the admin to add provider-specific quality patterns. This is an advanced setting — most users will never need to touch it.
 
-#### 5.10.4 Title Filter Mechanism
+#### 5.10.4 Title Derivation and Optional Title Filters
 
-**Problem:** IPTV providers often have messy titles with extra metadata, prefixes, suffixes, or junk that interferes with classification and matching. Examples: "[US] Movie Title 4K", "Movie Title (2022) - Premium", "VOD: Series Name S01E01 HD". Without filtering, the classification cascade misfires and the content_hash produces poor matches.
+Title handling is two separate functions, re-verified on 2026-10-08 against Vodstrm's source (`app/ingestion/parser.py`, `app/ingestion/xtream_native.py`, `app/filters/engine.py`, `master` branch). An earlier draft of this section merged them into one regex clean-up pass that stripped quality, codec, and prefix tokens before classification. That was a misreading of Vodstrm and has been withdrawn.
 
-**Approach (from Vodstrm):** Vodstrm has a filter engine with four operations: replace, remove, exclude, include_only. This is powerful but complex. Kondooit simplifies this while keeping the essential capabilities.
+1. **Default title parser (required).** Part of ingestion. Derives `cleaned_title` together with classification. This is the content identity input and is sufficient for the majority of provider titles without any configuration.
+2. **User title filters (optional, deferred).** A later pass that a user configures for providers with unconventional naming. Not required for the initial implementation.
 
-**Kondooit's implementation:**
+##### Default title parser (mimics Vodstrm)
 
-Three filter types, applied in order during ingestion (before classification):
+**Confirmed facts (Vodstrm source):**
 
-**1. Title cleanup rules (replace/remove) — auto-applied defaults:**
+Vodstrm does not search for and strip noise tokens. It derives the clean title by **truncating the name at the classifying token** found by the classification cascade (§5.4). Everything after that token, such as quality, codec, release group, or language tags, is dropped by the cut itself.
 
-A built-in set of regex replacements that clean up common title junk. These run on every provider without configuration:
+Title source:
+- **M3U:** the display name after the last `"` of the `#EXTINF` line (`_parse_extinf`: split at the last quote; attributes before, name after). `tvg-name` is not used for the title. If the line has no quoted attributes, the whole remainder after the duration is the name.
+- **Xtream Codes:** the item's `name` field. Live, movie, and series come from separate API endpoints, so classification by pattern is not needed for type (see below).
 
-| Rule | Pattern | Replacement | Purpose |
-|---|---|---|---|
-| Remove bracketed prefixes | `^\[.+?\]\s*` | `` | Removes `[US]`, `[VOD]`, `[Premium]` etc. |
-| Remove VOD: prefix | `^VOD:\s*` | `` | Common IPTV prefix |
-| Remove trailing quality | `\s+(4K|2160p|1080p|720p|480p|HEVC|HDR|UHD)(?:\s|$)+` | `` | Quality is detected separately |
-| Remove trailing codec tags | `\s+(H264|H265|X264|X265|x264|x265)(?:\s|$)+` | `` | Codec is detected separately |
-| Collapse multiple spaces | `\s{2,}` | ` ` | Clean formatting |
-| Strip trailing dashes | `\s*[-–—]\s*# Live TV Research — Dispatcharr & Vodstrm Analysis and Implementation Plan
+Cascade and cut point (M3U, `_classify`; first match wins):
+
+| Order | Condition | Type | Extracted | `cleaned_title` |
+|---|---|---|---|---|
+| 1 | `duration == "-1"` and not `force_vod` | live | — | whole name, trailing junk trimmed |
+| 2 | `\bS(\d{1,3})[ ._-]?E(\d{1,3})\b` (case-insensitive), else `\b(\d{1,3})[xX](\d{1,3})\b`; first occurrence | series | season, episode | text before the match |
+| 3 | Air date preceded by whitespace: `YYYY[ ._-]MM[ ._-]DD`, else `DD[ ._-]MM[ ._-]YYYY`; last occurrence | tv_vod | air date, normalised to dash-separated | text before the match |
+| 4 | Year `\b(19\d{2}|20\d{2})\b`; **last** occurrence | movie | year | text before the year; if the character immediately before the year is `(`, `[` or `{`, the cut moves back one so the bracket is dropped too |
+| 5 | none | unsorted | — | whole name, trailing junk trimmed |
+
+Final trim (`_clean_name`): remove any trailing run of `.`, `_`, `-`, or space, then strip surrounding whitespace. No other normalisation is applied; case is preserved for display.
+
+Behaviour that follows from the cut approach:
+- `Movie Title (2022) 1080p HEVC-GRP` → `Movie Title`, year 2022.
+- `Show.Name.S01E02.720p.WEB` → `Show.Name`, S1E2. Separators inside the title are kept; trailing separators are trimmed.
+- `2001 A Space Odyssey 1968` → `2001 A Space Odyssey`, year 1968 (last year wins, so a year inside the title is preserved).
+- Leading prefixes such as `[US]`, `EN - `, or `VOD:` are **not** removed by the parser. Handling these is the job of the optional title filters.
+
+Xtream Codes title derivation (`xtream_native.py`):
+- **Live:** `name` trimmed with `_clean_name`.
+- **Movies** (`get_vod_streams`, `_movie_identity`): if the name contains a year, cut at the last year and also strip trailing ` ([._-`, using that year. If not, the clean title is the trimmed name and the year comes from the API's `year` field.
+- **Series episodes** (`get_series` + `get_series_info`): the clean title is the series `name` from the catalog, trimmed. Season and episode come from the API's structured fields, not from parsing; a synthetic raw title `"<series> SxxEyy"` is recorded for diagnostics.
+
+**Kondooit's implementation:** reproduce the above as the default parser in the VOD ingestion path, as faithfully as practical, including regexes, first/last-occurrence rules, the bracket-before-year adjustment, and the trailing trim. `raw_title` (the unmodified name) is kept alongside `cleaned_title`. `content_hash` is computed from the parser output only (type, lower-cased `cleaned_title`, season, episode, year, air date), so identity never depends on user filter configuration.
+
+Matching a `cleaned_title` to catalog content during source search (§5.8) applies its own comparison normalisation (lower-casing, separator folding). That is a matching concern; it does not alter the stored `cleaned_title`.
+
+##### User title filters (optional, deferred)
+
+**Confirmed facts (Vodstrm `app/filters/engine.py`):** filters run after parsing, always starting from `cleaned_title`, and their output is written per stream, never to the entry. The order is: replace terms, then remove terms, then whitespace normalisation (falling back to `cleaned_title` if the result is empty). Exclude and include-only rules match against `raw_title` and set flags; they do not alter titles. Rules can be scoped to providers and content types.
+
+**Kondooit's position:**
+- Not required for the initial VOD implementation. The default parser is expected to be adequate for most providers.
+- When introduced, it is a simple per-provider list of user-defined terms to **remove** or **replace**, applied to `cleaned_title` after parsing. It ships with no built-in defaults; Kondooit does not try to guess noise tokens.
+- Filter output is used for display and matching only. It must not change `content_hash`, so editing a filter never re-keys existing content.
+- Exclude and include-only rules, regex authoring, and type scoping are not planned; they can be reconsidered if real providers need them.
+- The `iptv_filters` table (§5.7) and the filter configuration endpoints and UI (§6 Phase 4) are created only when this feature is implemented.
 
 #### 5.10.5 Summary of VOD Lifecycle
 
-``Provider Refresh Triggered``
+```
+Provider refresh triggered
          ↓
-``Generate batch_id``
+Generate batch_id
          ↓
-``Fetch content from provider (M3U or XC)``
+Fetch content from provider (M3U or XC)
          ↓
-``Apply title cleanup defaults``
+Default parser: classify and derive cleaned_title by truncation
+(live → series → tv_vod → movie → unsorted; XC uses endpoint type)
          ↓
-``Apply provider-level title replacement rules``
+Detect quality from raw_title
          ↓
-``Apply provider-level exclude filters``
+Compute content_hash from parser output
          ↓
-``Classify entries (live → series → tv_vod → movie → unsorted)``
+Upsert VODEntry (by content_hash) and VODStream (by entry + provider, tagged with batch_id)
          ↓
-``Detect quality from raw title``
+[Optional, when implemented] apply user remove/replace terms to cleaned_title for display and matching
          ↓
-``Compute content_hash for each entry``
+Delete stale VODStreams (old batch_id for this provider)
          ↓
-``Upsert VODEntry (by content_hash) and VODStream (by entry + provider, tagged with batch_id)``
+Delete orphaned VODEntries (zero remaining streams)
          ↓
-``Delete stale VODStreams (old batch_id for this provider)``
-         ↓
-``Delete orphaned VODEntries (zero remaining streams)``
-         ↓
-``Refresh complete``
+Refresh complete
+```
 
 When source search queries the VOD library:
-``Query iptv_vod_entries by cleaned_title + year/season/episode``
+```
+Query iptv_vod_entries by cleaned_title + year/season/episode
          ↓
-``Get all matching VODStreams (from all active providers)``
+Get all matching VODStreams (from all active providers)
          ↓
-``Sort by provider priority → quality → last_seen``
+Sort by provider priority → quality → last_seen
          ↓
-``Return as SourceResult list (all streams, best first)``
+Return as SourceResult list (all streams, best first)
+```
 
 ### 5.11 Live TV Guide and Channel Playback
 
@@ -1099,7 +1133,7 @@ Escalation is automatic and requires no user action. Each tier is attempted at m
 
 **Probe info storage:** add nullable columns to `channels`: `probe_container`, `probe_video_codec`, `probe_audio_codec`, `probed_at`. Provider-supplied data on the channel, not an override; refreshed by the server, never edited by users.
 
-**Relationship to the roadmap:** the roadmap's v0.0.1/v0.0.2 "No transcoding" exclusions and its "Transcoding" future-milestone entry predate the implemented HLS playback path, which already remuxes and transcodes under ADR-0014/ADR-0016. The roadmap is out of date on this point and should be corrected separately; this plan introduces no new transcoding capability, only applies the existing one to live channels.
+**Relationship to the roadmap:** the roadmap's v0.0.1/v0.0.2 "No transcoding" exclusions describe those milestones as originally scoped and are now annotated as later delivered; the roadmap's "Delivered Beyond the Original Milestone Plan" section records the implemented HLS playback path, which already remuxes and transcodes under ADR-0014/ADR-0016. This plan introduces no new transcoding capability, only applies the existing one to live channels.
 
 #### 5.11.4 Provider Connection Limits
 
@@ -1200,14 +1234,15 @@ The implementation should be ordered to build each layer on the previous one:
 3. Web UI: channel grid, channel detail, channel management
 
 **Phase 4: VOD Ingestion**
-1. Domain entities (VODEntry, VODStream with batch_id and quality_label, FilterRule)
+1. Domain entities (VODEntry, VODStream with batch_id and quality_label)
 2. Infrastructure: extend M3U parser + Xtream client for VOD content
-3. Application: title cleanup defaults + quality detection map
-4. Application: VOD ingestion service (filter → classify → detect quality → dedup → persist → stale cleanup → orphan cleanup)
+3. Application: default title parser mimicking Vodstrm (§5.10.4) + quality detection map
+4. Application: VOD ingestion service (parse/classify → detect quality → dedup → persist → stale cleanup → orphan cleanup)
 5. Application: integrate VOD search into source discovery pipeline (sort by priority → quality → freshness)
-6. API: filter configuration endpoints (per-provider exclude and replacement rules)
-7. API: quality terms configuration endpoints (per-provider, optional)
-8. UI: filter and quality settings in IPTV provider configuration page
+6. API: quality terms configuration endpoints (per-provider, optional)
+7. UI: quality settings in IPTV provider configuration page
+8. Tests: parser fixtures covering each cascade branch, last-year rule, bracket-before-year, trailing trim, and Xtream movie/series title derivation
+9. Deferred, separate step: optional user remove/replace title terms (`iptv_filters` table, endpoints, UI) only if real providers need it
 
 **Phase 5: User Agent Support**
 1. Domain: add `user_agent` fields to provider and channel/override models
@@ -1287,6 +1322,8 @@ Before implementation begins, the following ADRs should be created as Proposed:
 
 These ADRs would be created as Proposed, then moved to Accepted when the roadmap authorizes implementation.
 
+**Status (2026-10-08):** created as Proposed — [ADR-0020](../decisions/ADR-0020-iptv-provider-architecture.md), [ADR-0021](../decisions/ADR-0021-epg-and-channel-domain-model.md), [ADR-0022](../decisions/ADR-0022-iptv-vod-as-source-candidates-only.md), [ADR-0023](../decisions/ADR-0023-live-tv-playback-and-failure-driven-fallback.md). ADR-0015 remains Accepted until ADR-0023 is accepted.
+
 ---
 
 ## 9. Key Takeaways
@@ -1297,7 +1334,7 @@ These ADRs would be created as Proposed, then moved to Accepted when the roadmap
 
 - **Architectural alignment:** All new domain entities are pure Python dataclasses. All parsing is infrastructure. All scheduling is infrastructure. The provider abstraction (IPTVProviderPort) follows the existing pattern (MetadataProvider, SourceProvider). VOD integration with source discovery is a thin adapter — the VOD library is queried and results are normalized to SourceResult.
 
-- **VOD lifecycle management:** Stale content is cleaned up via batch-based reconciliation (content dropped by a provider is removed). Duplicate entries across providers are handled by provider priority (all streams kept, ranked by priority → quality → freshness). Quality terms detect quality from stream titles (global defaults auto-applied, per-provider overrides optional). Title filters clean up poorly parsed titles (global cleanup defaults auto-applied, per-provider exclude and replacement rules user-configured).
+- **VOD lifecycle management:** Stale content is cleaned up via batch-based reconciliation (content dropped by a provider is removed). Duplicate entries across providers are handled by provider priority (all streams kept, ranked by priority → quality → freshness). Quality terms detect quality from stream titles (global defaults auto-applied, per-provider overrides optional). Clean titles come from a default parser that mimics Vodstrm: it truncates the name at the episode, air-date, or year token, so trailing quality, codec, and release-group text drops away without token stripping. Optional user remove/replace terms are a separate, deferred second pass that never changes content identity.
 
 - **Guide and live playback:** A time-based guide grid is the default Live TV view; selecting a channel or airing programme starts playback. Live channels use the existing direct → remux → transcode chain with an added audio-only conversion step, start at the tier predicted by cached stream probing, and automatically escalate when the device reports a format failure. The working tier is remembered per channel and device type.
 

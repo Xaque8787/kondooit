@@ -27,19 +27,19 @@ Unresolved questions that must be answered before the corresponding parts of the
 
 - How should the two routing modes (direct vs. server-proxy) be modeled in the client-facing protocol and API?
 - What is the session lifecycle for proxied playback?
-- How is transcoding invoked by the playback engine, and what does the transcoding provider interface look like?
+- How is transcoding invoked by the playback engine, and what does the transcoding provider interface look like? → Partially resolved: [ADR-0014](../decisions/ADR-0014-direct-delivery-default-with-proxy-remux-transcode-fallback.md) makes transcoding an invokable step in the direct → remux → transcode chain, and [ADR-0016](../decisions/ADR-0016-hls-remux-for-web-playback.md) defines the HLS path that carries it. Basic FFmpeg remux, audio conversion, and H.264 transcoding are implemented. Still open: whether transcoding becomes a pluggable provider interface (e.g. for hardware acceleration).
 
 ## Content model
 
 - How should seasons/episodes/collections map across providers that do not natively model them?
-- How are live channels, EPG programs, and schedules modeled concretely, and how do they relate to metadata identity? → Resolved (Proposed) by [livetv_research.md](../research/livetv_research.md) §7.2. ADR to be created: "EPG and channel domain model" — Channel, ChannelGroup, ChannelOverride, EPGSource, EPGChannel, Program as domain entities. ChannelOverride pattern for user customization preservation. Provider-first channel numbering with next-available fallback.
+- How are live channels, EPG programs, and schedules modeled concretely, and how do they relate to metadata identity? → Resolved (Proposed) by [livetv_research.md](../research/livetv_research.md) §7.2. Recorded as [ADR-0021](../decisions/ADR-0021-epg-and-channel-domain-model.md) (Proposed): "EPG and channel domain model" — Channel, ChannelGroup, ChannelOverride, EPGSource, EPGChannel, Program as domain entities. ChannelOverride pattern for user customization preservation. Provider-first channel numbering with next-available fallback.
 
 ## IPTV / Live TV
 
-- Should IPTV providers be a new provider type or extend the existing SourceProvider abstraction? → Resolved (Proposed) by [livetv_research.md](../research/livetv_research.md) §7.1. IPTV is a separate capability with its own interface (IPTVProviderPort), not an extension of SourceProvider. ADR to be created: "IPTV provider architecture."
+- Should IPTV providers be a new provider type or extend the existing SourceProvider abstraction? → Resolved (Proposed) by [livetv_research.md](../research/livetv_research.md) §7.1. IPTV is a separate capability with its own interface (IPTVProviderPort), not an extension of SourceProvider. Recorded as [ADR-0020](../decisions/ADR-0020-iptv-provider-architecture.md) (Proposed).
 - Should EPG matching use rapidfuzz or a simpler string similarity? → Resolved by [livetv_research.md](../research/livetv_research.md) §7.2. Use rapidfuzz.
 - How should the scheduler be initialized and managed? → Resolved by [livetv_research.md](../research/livetv_research.md) §7.3. APScheduler integrated into Litestar startup/shutdown lifecycle. Follow-up: investigate whether cron-style or timezone-aware scheduling is needed beyond simple hour intervals.
-- Should VOD content from IPTV providers appear in the main discovery catalog or only as source results? → Resolved by [livetv_research.md](../research/livetv_research.md) §7.4. IPTV VOD is source-only — no dedicated browse section. All content discovery goes through the single unified source search pipeline. The v0.0.2 roadmap statement about a dedicated IPTV section is superseded by this decision and should be updated. ADR to be created: "IPTV VOD as source candidates only."
+- Should VOD content from IPTV providers appear in the main discovery catalog or only as source results? → Resolved by [livetv_research.md](../research/livetv_research.md) §7.4. IPTV VOD is source-only — no dedicated browse section. All content discovery goes through the single unified source search pipeline. The v0.0.2 roadmap statement about a dedicated IPTV section is superseded by this decision and should be updated. Recorded as [ADR-0022](../decisions/ADR-0022-iptv-vod-as-source-candidates-only.md) (Proposed).
 - Should channel numbers be auto-assigned or manually set on first import? → Resolved by [livetv_research.md](../research/livetv_research.md) §7.5. Provider-first numbering with next-available fallback, overridable via ChannelOverride.
 
 ## Acquisition
@@ -75,7 +75,7 @@ Questions resolved by ADRs to date:
 - Canonical content identity ownership → [ADR-0003](../decisions/ADR-0003-core-owns-canonical-identity.md)
 - Downloads and local sources → [ADR-0004](../decisions/ADR-0004-downloads-create-local-sources.md)
 - Tenancy model → [ADR-0005](../decisions/ADR-0005-single-server-household-model.md)
-- Playback orchestration, proxy, transcoding → [ADR-0006](../decisions/ADR-0006-playback-orchestration-and-transport.md)
+- Playback orchestration, proxy, transcoding → [ADR-0006](../decisions/ADR-0006-playback-orchestration-and-transport.md) (superseded by [ADR-0014](../decisions/ADR-0014-direct-delivery-default-with-proxy-remux-transcode-fallback.md))
 - iroh default and transport independence → [ADR-0007](../decisions/ADR-0007-iroh-default-transport-independent-protocol.md)
 - Technology baseline and implementation-layer boundaries → [ADR-0008](../decisions/ADR-0008-technology-baseline-and-implementation-layer-boundaries.md)
 
